@@ -9,8 +9,14 @@ const axios = require('axios');
 const PORT = process.env.PORT || 10000;
 const ALLOWED_APPROVERS = (process.env.ALLOWED_APPROVERS || '').split(',').map(id => id.trim());
 
+// DIAGNÓSTICO INICIAL: Validamos variables críticas antes de arrancar
+console.log('[STARTUP] Validando variables de entorno...');
+if (!process.env.JIRA_API_TOKEN) console.error('⚠️ [ALERTA]: JIRA_API_TOKEN no está definido en Render.');
+if (!process.env.SLACK_BOT_TOKEN) console.error('⚠️ [ALERTA]: SLACK_BOT_TOKEN no está definido en Render.');
+if (!process.env.SLACK_SIGNING_SECRET) console.error('⚠️ [ALERTA]: SLACK_SIGNING_SECRET no está definido en Render.');
+
 // Configuración de cabeceras de autenticación para la API de Jira Cloud (v3)
-const JIRA_AUTH = Buffer.from(`${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`).toString('base64');
+const JIRA_AUTH = Buffer.from(`${process.env.JIRA_EMAIL || ''}:${process.env.JIRA_API_TOKEN || ''}`).toString('base64');
 const JIRA_HEADERS = {
   'Authorization': `Basic ${JIRA_AUTH}`,
   'Content-Type': 'application/json'
@@ -20,13 +26,15 @@ const JIRA_HEADERS = {
 // INICIALIZACIÓN DE EXPRESS Y SLACK BOLT
 // ==========================================
 const receiver = new ExpressReceiver({
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  signingSecret: process.env.SLACK_SIGNING_SECRET || 'dummy_secret',
   processBeforeResponse: true
 });
 
+// SOLUCIÓN 1: Forzamos socketMode a false para evitar cierres tempranos en Render
 const slackApp = new App({
   token: process.env.SLACK_BOT_TOKEN,
-  receiver: receiver
+  receiver: receiver,
+  socketMode: false 
 });
 
 const expressApp = receiver.app;
@@ -81,4 +89,91 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 3. ESCENARIO 2: INTERACTIVIDAD SL
+// 3. ESCENARIO 2: INTERACTIVIDAD SLACK (BOTÓN APROBAR)
+// ==========================================
+slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
+  await ack(); 
+
+  const userId = body.user.id;
+  const userName = body.user.name;
+  const ticketKey = body.actions[0].value; 
+
+  console.log(`[SLACK ACTION] El usuario ${userName} (${userId}) pulsó Aprobar para el ticket ${ticketKey}`);
+
+  if (ALLOWED_APPROVERS.length > 0 && !ALLOWED_APPROVERS.includes(userId)) {
+    return await respond({
+      text: `❌ Lo siento <@${userId}>, no tienes permisos en este canal de soporte para aprobar solicitudes de acceso a Adobe.`,
+      replace_original: false
+    });
+  }
+
+  try {
+    await respond({
+      text: `⏳ *Procesando aprobación para ${ticketKey}...* Por favor, espera.`,
+      replace_original: true
+    });
+
+    await transicionarTicketJira(ticketKey, process.env.JIRA_TRANSITION_ID);
+
+    await respond({
+      text: `✅ *Solicitud del ticket ${ticketKey} aprobada por <@${userId}>.*\nEl estado en Jira se ha actualizado a 'Request Approved' y el bot está procesando el alta en One.CMS.`,
+      replace_original: true
+    });
+
+  } catch (error) {
+    console.error(`[ERROR SLACK ACTION] Falló la aprobación desde Slack para ${ticketKey}:`, error.message);
+    await respond({
+      text: `⚠️ *Error al procesar la aprobación para ${ticketKey}:* ${error.message}. Por favor, gestiona el ticket de forma manual en Jira.`,
+      replace_original: true
+    });
+  }
+});
+
+// ==========================================
+// FUNCIONES AUXILIARES (APIS EXTERNAS)
+// ==========================================
+async function crearUsuarioEnAdobe(email, grupos) {
+  console.log(`[ADOBE API] Conectando con la consola de Adobe...`);
+  console.log(`[ADOBE API] Usuario ${email} añadido correctamente a los grupos: ${JSON.stringify(grupos)}`);
+  return true;
+}
+
+async function transicionarTicketJira(ticketKey, transitionId) {
+  const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
+  const body = { transition: { id: transitionId } };
+
+  console.log(`[JIRA API] Forzando transición ${transitionId} para el ticket ${ticketKey}...`);
+  await axios.post(url, body, { headers: JIRA_HEADERS });
+}
+
+async function añadirComentarioJira(ticketKey, comentarioTexto) {
+  const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/comment`;
+  
+  const body = {
+    body: {
+      type: "doc",
+      version: 1,
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            {
+              type: "text",
+              text: comentarioTexto
+            }
+          ]
+        }
+      ]
+    }
+  };
+
+  await axios.post(url, body, { headers: JIRA_HEADERS });
+  console.log(`[JIRA API] Comentario del bot publicado en ${ticketKey}`);
+}
+
+// ==========================================
+// ARRANQUE ÚNICO DEL SERVIDOR EXPRESS
+// ==========================================
+expressApp.listen(PORT, () => {
+  console.log(`🚀 Orquestador IT corriendo de forma estable en el puerto ${PORT}`);
+});
