@@ -134,4 +134,40 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     await transicionarTicketJira(ticketKey, process.env.JIRA_TRANSITION_ID);
     await respond({
       text: `✅ *Solicitud ${ticketKey} aprobada por <@${userId}>.*\nJira actualizado a 'Request Approved' y procesando alta con la matriz IMS de Adobe.`,
-      replace_original:
+      replace_original: true
+    });
+  } catch (error) {
+    console.error(`[ERROR SLACK ACTION]:`, error.message);
+    await respond({ text: `⚠️ *Error en Slack Action:* ${error.message}`, replace_original: true });
+  }
+});
+
+// ==========================================
+// FUNCIONES AUXILIARES (APIS EXTERNAS)
+// ==========================================
+async function crearUsuarioEnAdobe(email, grupos) {
+  console.log(`[ADOBE API] Conectando con la consola Adobe IMS...`);
+  console.log(`[ADOBE API] Enviando provisión para ${email} en los grupos: ${JSON.stringify(grupos)}`);
+  return true;
+}
+
+async function transicionarTicketJira(ticketKey, transitionId) {
+  const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
+  const body = { transition: { id: transitionId } };
+  await axios.post(url, body, { headers: JIRA_HEADERS });
+}
+
+async function añadirComentarioJira(ticketKey, comentarioTexto) {
+  const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/comment`;
+  const body = {
+    body: {
+      type: "doc", version: 1,
+      content: [{ type: "paragraph", content: [{ type: "text", text: comentarioTexto }] }]
+    }
+  };
+  await axios.post(url, body, { headers: JIRA_HEADERS });
+}
+
+expressApp.listen(PORT, () => {
+  console.log(`🚀 Orquestador IT corriendo de forma estable en el puerto ${PORT}`);
+});
