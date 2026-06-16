@@ -1,0 +1,15 @@
+{
+  "name": "hst-ar-bot",
+  "version": "1.0.0",
+  "description": "IT Orchestrator & Access Request Router",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@slack/bolt": "^3.21.0",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
