@@ -75,4 +75,49 @@ expressApp.post('/jira-webhook', async (req, res) => {
       console.log(`[TRIGGER AUTOMÁTICO] Ejecutando alta para ${userEmail} en Adobe CMS...`);
 
       // 1. Ejecutar llamada a la API de Adobe para crear el usuario
-      await crearUsuarioEnAdobe(userEmail,
+      await crearUsuarioEnAdobe(userEmail, ["Adobe_CMS_Solvers_Group"]);
+
+      // 2. Añadir un comentario de éxito en el ticket de Jira
+      await añadirComentarioJira(ticketKey, `🤖 *[Bot]* Alta de usuario gestionada y automatizada de forma exitosa en One.CMS (AEM) para el email: ${userEmail}.`);
+      
+      return res.status(200).send('Automatización de Alta completada con éxito.');
+    }
+
+    res.status(200).send('Ticket recibido pero no cumple las condiciones de automatización para One.CMS.');
+  } catch (error) {
+    console.error('[ERROR JIRA WEBHOOK]:', error.message);
+    res.status(500).send('Error interno procesando el webhook de Jira');
+  }
+});
+
+// ==========================================
+// 3. ESCENARIO 2: INTERACTIVIDAD SLACK (BOTÓN APROBAR)
+// ==========================================
+// Se ejecuta cuando un aprobador pulsa el botón en el canal de Slack
+slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
+  await ack(); // Le avisa a Slack de inmediato que hemos recibido el clic
+
+  const userId = body.user.id;
+  const userName = body.user.name;
+  const ticketKey = body.actions[0].value; // Recuperamos el ID del ticket que inyectó Jira Automation
+
+  console.log(`[SLACK ACTION] El usuario ${userName} (${userId}) pulsó Aprobar para el ticket ${ticketKey}`);
+
+  // Control de Seguridad: Validamos si el usuario de Slack está autorizado
+  if (ALLOWED_APPROVERS.length > 0 && !ALLOWED_APPROVERS.includes(userId)) {
+    return await respond({
+      text: `❌ Lo siento <@${userId}>, no tienes permisos en este canal de soporte para aprobar solicitudes de acceso a Adobe.`,
+      replace_original: false
+    });
+  }
+
+  try {
+    // 1. Notificar en el canal de Slack que la petición está en proceso
+    await respond({
+      text: `⏳ *Procesando aprobación para ${ticketKey}...* Por favor, espera.`,
+      replace_original: true
+    });
+
+    // 2. Hacer la llamada a la API de Jira para transicionar el estado del ticket a "Request Approved"
+    // Esto provocará que Jira cambie el estado y, de rebote, disparará el Escenario 1 para el alta automática
+    await transicionarTicketJira(ticketKey, process.env.JIRA
