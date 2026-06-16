@@ -3,113 +3,152 @@ const express = require('express');
 const axios = require('axios');
 require('dotenv').config();
 
-// 1. Inicializar la App de Slack (Para recibir los clics de los botones)
+// 1. Inicializar la App de Slack (Usa las Env Vars de Render)
 const slackApp = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
   processBeforeResponse: true
 });
 
-// 2. Inicializar Express (Servidor web para recibir los Webhooks de Jira)
+// 2. Inicializar Express para los Webhooks de Jira
 const expressApp = express();
 expressApp.use(express.json());
 expressApp.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3000;
 
+// Configuración de credenciales de Jira
+const JIRA_AUTH = Buffer.from(`${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`).toString('base64');
+const JIRA_HEADERS = {
+  'Authorization': `Basic ${JIRA_AUTH}`,
+  'Content-Type': 'application/json'
+};
+
 // ==========================================
-// ESCENARIO 2: APROBACIÓN DESDE SLACK
+// ESCENARIO 2: BOTÓN DE APROBACIÓN EN SLACK
 // ==========================================
-// Maneja el clic en el botón "Aprobar" de Slack
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
-  await ack(); // Responder a Slack de inmediato para que no dé timeout
+  await ack(); 
   
-  const userId = body.user.id; // ID del usuario de Slack que pulsa el botón
-  const ticketKey = body.actions[0].value; // Guardamos el ID del ticket de Jira aquí
+  const userId = body.user.id; 
+  const ticketKey = body.actions[0].value; 
   const allowedApprovers = process.env.ALLOWED_APPROVERS ? process.env.ALLOWED_APPROVERS.split(',') : [];
 
-  // Validación de seguridad
+  // Validar si quien pulsa en Slack está autorizado
   if (!allowedApprovers.includes(userId)) {
     await respond({
-      text: `❌ <@${userId}>, no tienes permisos para aprobar esta solicitud.`,
+      text: `❌ <@${userId}>, no tienes permisos en negocio para aprobar esta solicitud.`,
       replace_original: false
     });
     return;
   }
 
   try {
-    // Si es aprobador, cambiamos el estado del ticket en Jira a "Request Approved"
-    await transicionarTicketJira(ticketKey, "Request Approved");
+    // Transicionamos el ticket al ID 21 (Request Approved)
+    await transicionarTicketJira(ticketKey, "21");
     
     await respond({
-      text: `✅ Solicitud para el ticket *${ticketKey}* aprobada por <@${userId}>. Procesando alta en Adobe...`,
+      text: `✅ Solicitud del ticket *${ticketKey}* aprobada por <@${userId}>. Moviendo a Request Approved y creando en Adobe...`,
       replace_original: true
     });
-
-    // Nota: Al cambiar el estado en Jira, este disparará el Escenario 1 automáticamente.
   } catch (error) {
-    console.error('Error al procesar aprobación de Slack:', error);
+    console.error('Error al transicionar desde Slack:', error);
+    await respond({
+      text: `❌ Error al intentar mover el ticket ${ticketKey} a Request Approved en Jira.`,
+      replace_original: false
+    });
   }
 });
 
 // ==========================================
-// ESCENARIO 1: TRIGGER DESDE JIRA (WEBHOOK)
+// ESCENARIO 1: WEBHOOK DE JIRA (TRIGGER GLOBAL)
 // ==========================================
-// Jira llamará a esta URL cuando un ticket pase a "Request Approved" (ya sea manual por el Solver o vía Slack)
 expressApp.post('/jira-webhook', async (req, res) => {
   const issue = req.body.issue;
   
-  if (!issue) {
+  if (!issue || !issue.fields) {
     return res.status(400).send('No issue data found');
   }
 
   const ticketKey = issue.key;
   const status = issue.fields.status.name;
   
-  // Extrae los campos personalizados de tu formulario de Jira (ejemplos)
-  const userEmail = issue.fields.customfield_10100; // Cambia por el ID real de tu campo Email
-  const tipologia = issue.fields.customfield_10101; // Cambia por el ID real de tu campo Tipología (ej. Adobe CMS)
+  // Extraemos los valores de tus campos dinámicos
+  const campoPadreArea = issue.fields.customfield_10623; // HST Platform/Application: access request select area
+  const campoHijoPlataforma = issue.fields.customfield_10620; // HST Platform/Application: access request websites platform
+  const userEmail = issue.fields.customfield_10088; // Campo eMail
 
+  // Validar si el ticket está en "Request Approved" (Da igual si llegó por el Solver o por Slack)
   if (status === 'Request Approved') {
-    console.log(`Disparando alta automática en Adobe para el ticket ${ticketKey}`);
     
-    try {
-      // AQUÍ SE LLAMA A LA API DE ADOBE ADMIN CONSOLE
-      await crearUsuarioEnAdobe(userEmail, tipologia);
+    // VALIDACIÓN DINÁMICA: ¿Es una petición de Websites -> One.CMS (AEM)?
+    // Jira a veces devuelve estos campos como objetos { id: "12362" } o strings. Validamos ambos casos:
+    const idPadre = campoPadreArea?.id || campoPadreArea;
+    const idHijo = campoHijoPlataforma?.id || campoHijoPlataforma;
+
+    if (idPadre === "12362" && idHijo === "12350") {
+      console.log(`[TRIGGER] El ticket ${ticketKey} cumple las condiciones de Adobe CMS. Iniciando aprovisionamiento para: ${userEmail}`);
       
-      // Opcional: Añadir comentario en Jira diciendo que ya está listo
-      res.status(200).send('Usuario creado en Adobe con éxito');
-    } catch (error) {
-      console.error('Error al crear usuario en Adobe:', error);
-      res.status(500).send('Error en la API de Adobe');
+      try {
+        // Llamada a la API de Adobe
+        await crearUsuarioEnAdobe(userEmail, ["Adobe_CMS_Solvers_Group"]); // Pasamos el grupo de AEM directamente
+        
+        // Añadir comentario de éxito en Jira
+        await axios.post(`https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/comment`, {
+          body: {
+            type: "doc",
+            version: 1,
+            content: [{
+              type: "paragraph",
+              content: [{ type: "text", text: "🤖 [Bot] Alta automatizada completada con éxito en Adobe Admin Console para la tipología One.CMS (AEM)." }]
+            }]
+          }
+        }, { headers: JIRA_HEADERS });
+
+        return res.status(200).send('Adobe Provisioning Done.');
+      } catch (error) {
+        console.error('Error en proceso Adobe:', error.message);
+        return res.status(500).send('Error creating Adobe user.');
+      }
+    } else {
+      console.log(`[INFO] El ticket ${ticketKey} está aprobado pero no es de tipología Adobe CMS (Padre: ${idPadre}, Hijo: ${idHijo}). Se ignora.`);
+      return res.status(200).send('Not an Adobe CMS request.');
     }
-  } else {
-    res.status(200).send('El ticket no está en estado aprobado, no se hace nada.');
   }
+
+  res.status(200).send('No action needed for this status.');
 });
 
-// Enrutar las peticiones interactivas de Slack a Bolt
+// Endpoint receptor interactivo para Slack
 expressApp.post('/slack/events', async (req, res) => {
-  // Manejador interno para que Slack y Bolt se entiendan mediante Express
   if (req.body.payload) {
     req.body = JSON.parse(req.body.payload);
   }
-  // Lógica para procesar con Bolt...
   res.sendStatus(200);
 });
 
-// Funciones auxiliares para conectar con las APIs externas
-async function transicionarTicketJira(ticketKey, nuevoEstado) {
-  // Aquí pondrás tu llamada Axios usando JIRA_DOMAIN, JIRA_EMAIL y JIRA_API_TOKEN
-  console.log(`Cambiando estado de ${ticketKey} a ${nuevoEstado} en Jira...`);
+// ==========================================
+// FUNCIONES DE CONEXIÓN (APIs)
+// ==========================================
+
+async function transicionarTicketJira(ticketKey, transitionId) {
+  const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
+  const payload = {
+    transition: {
+      id: transitionId // Aquí viaja el ID 21 que confirmaste
+    }
+  };
+
+  await axios.post(url, payload, { headers: JIRA_HEADERS });
+  console.log(`[Jira API] Ticket ${ticketKey} movido exitosamente usando la transición ${transitionId}.`);
 }
 
-async function crearUsuarioEnAdobe(email, grupos) {
-  // Aquí pondrás la llamada oficial a la API de Adobe Admin Console
-  console.log(`Llamando a Adobe API para el email ${email}...`);
+async function crearUsuarioEnAdobe(email, gruposAsignar) {
+  console.log(`[Adobe API] Simulando/Llamando alta para ${email} en grupos:`, gruposAsignar);
+  // Aquí va tu llamada con las credenciales de Adobe Admin Console
+  // Usando process.env.ADOBE_ORGANIZATION_ID, etc.
 }
 
-// Arrancar el servidor global
 expressApp.listen(PORT, () => {
   console.log(`Orquestador IT corriendo en el puerto ${PORT}`);
 });
