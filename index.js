@@ -132,7 +132,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
       if (resultadoAdobe.success) {
         const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
         
-        // FORMATO PULIDO: Sin asteriscos en las viñetas y nuevo titular
+        // FORMATO JIRA PULIDO
         comentarioJira = `🤖 *[Bot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
         
         // Bloqueamos el ticket para siempre si ha sido un éxito total
@@ -159,7 +159,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK (CONSERVANDO ENCABEZADO ORIGINAL)
+// 2. INTERACTIVIDAD SLACK (DISEÑO EXACTO SOLICITADO)
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   const userId = body.user.id;
@@ -174,14 +174,14 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // Al dar ack, borramos los botones y dejamos una carga manteniendo el título original
+  // Desvanecimiento instantáneo de los botones dejando el esqueleto original en carga
   await ack({
     text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n🔄 _Processing approval (Requested by <@${userId}>)..._`,
     replace_original: true
   });
 
   try {
-    // Recuperamos los campos dinámicos del ticket en Jira para reconstruir el mensaje
+    // 1. Recuperamos los campos dinámicos del ticket en Jira para reconstruir la tarjeta entera
     console.log(`🔍 [SLACK ACTION] Recuperando datos del ticket ${ticketKey} desde Jira...`);
     const ticketRes = await axios.get(`https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}`, { headers: JIRA_HEADERS });
     const fields = ticketRes.data?.fields || {};
@@ -191,9 +191,15 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     const userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || 'User') : (fields.customfield_10190 || 'User');
     
     const mercado = (fields.customfield_10257?.value || 'GLOBAL').trim();
-    const permiso = (fields.customfield_10612?.value || 'Preview').trim();
+    const permisoOriginal = (fields.customfield_10612?.value || 'Preview').trim();
 
-    // Transicionamos el estado del ticket en Jira
+    // Adaptamos el texto estético del permiso según vuestro estándar
+    let permisoSlack = 'Preview';
+    if (permisoOriginal.toLowerCase() === 'editor') {
+      permisoSlack = 'Edition (+preview)';
+    }
+
+    // 2. Transicionamos el estado del ticket en Jira
     console.log(`🔧 [JIRA API] Buscando transiciones para mover ${ticketKey}...`);
     const transUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
     const resTrans = await axios.get(transUrl, { headers: JIRA_HEADERS });
@@ -207,15 +213,15 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     console.log(`🚀 [JIRA API] Ejecutando transición (ID: ${foundTransition.id}) hacia 'Request Approved'...`);
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
-    // RESPUESTA RECONSTRUIDA: Mantiene el formato original arriba y añade el éxito con el desglose abajo
+    // 3. RESPUESTA RECONSTRUIDA EXACTA: Estructura original arriba + Éxito + Desglose limpio abajo
     await respond({
-      text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmail}\n\n✅ *Approved and processed successfully.*\nAction executed by <@${userId}>. Status moved to *Request Approved*.\n\n*User Profile managed:*\n- Name: ${userFirstName.trim()} ${userLastName.trim()}\n- Market: ${mercado}\n- Permission: ${permiso}`,
+      text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmail}\n\n Approved and processed successfully.\nAction executed by <@${userId}>. Status moved to *Request Approved*.\n\n*User Profile managed:*\n- Name: ${userFirstName.trim()} ${userLastName.trim()}\n- Market: ${mercado}\n- Permission: ${permisoSlack}`,
       replace_original: true
     });
 
   } catch (jiraError) {
     console.error('💥 [ERROR SLACK ACTION]:', jiraError.message);
-    // Si falla, conserva la cabecera original pero avisa del error técnico abajo
+    // Si falla, conserva la estructura original pero notifica del error abajo
     await respond({
       text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n⚠️ *Slack action registered, but Jira update encountered an issue:* ${jiraError.message}`,
       replace_original: true
