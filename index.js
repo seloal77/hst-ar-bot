@@ -94,7 +94,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK: EL CTA SÓLO CONFIRMA EN PANTALLA
+// 2. INTERACTIVIDAD SLACK: MANTIENE EL MENSAJE ANTERIOR
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   await ack(); 
@@ -106,11 +106,11 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // Como Jira Automation ya movió el ticket a Request Review al nacer,
-  // el botón de Slack siempre responderá "OK" al instante sin peligro de error 400.
+  // Al usar replace_original: false, Slack no destruye el mensaje que contiene los datos del ticket.
+  // Envía esta confirmación justo debajo, manteniendo visible toda la información anterior.
   await respond({
     text: `✅ *Action registered for <${ticketUrl}|${ticketKey}> by <@${userId}>.*\nProceeding with Adobe IMS matrix provisioning...`,
-    replace_original: true
+    replace_original: false
   });
 });
 
