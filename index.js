@@ -87,7 +87,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
       console.log(`👥 [ADOBE] Intentando asignar al usuario ${userEmail} los grupos:`, gruposAdobeFinales);
 
-      // Llamada corregida a la API de Adobe
+      // Llamada a la API de Adobe adaptada a la normativa VW
       const adobeSuccess = await crearUsuarioEnAdobe(userEmail, gruposAdobeFinales);
 
       const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
@@ -158,7 +158,7 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 });
 
 // ==========================================
-// API REAL DE ADOBE (MODIFICADA SIN CREATEADOBEID)
+// API REAL DE ADOBE (CONTRATADA NORMATIVA VW FEDERATED ID)
 // ==========================================
 async function crearUsuarioEnAdobe(email, grupos) {
   console.log('🔑 [ADOBE] Solicitando Token de acceso a Adobe Authentication...');
@@ -176,15 +176,27 @@ async function crearUsuarioEnAdobe(email, grupos) {
 
     const adobeEndpoint = `https://usermanagement.adobe.io/v2/usermanagement/action/${process.env.ADOBE_ORG_ID}`;
     
-    // PAYLOAD CORREGIDO: Eliminamos createAdobeID para que use Federated/Enterprise ID y no de error
+    // NORMATIVA VW COMPLIANT: Creamos como FederatedID y luego asociamos los grupos en cascada
     const adobePayload = [{
       "user": email,
       "do": [
-        { "add": { "group": grupos } }
+        { 
+          "createFederatedID": {
+            "email": email,
+            "country": "ES",
+            "firstname": "HolaMarkets",
+            "lastname": "User"
+          } 
+        },
+        { 
+          "add": { 
+            "group": grupos 
+          } 
+        }
       ]
     }];
 
-    console.log(`📡 [ADOBE] Enviando petición final de alta al Endpoint de Adobe...`);
+    console.log(`📡 [ADOBE] Enviando petición final de alta al Endpoint de Adobe (Federated ID + Groups)...`);
     const apiResponse = await axios.post(adobeEndpoint, adobePayload, {
       headers: { 'Authorization': `Bearer ${accessToken}`, 'X-Api-Key': process.env.ADOBE_CLIENT_ID, 'Content-Type': 'application/json' }
     });
@@ -196,7 +208,7 @@ async function crearUsuarioEnAdobe(email, grupos) {
       return false;
     }
 
-    console.log('🎉 [ADOBE] ¡Usuario procesado con éxito en Adobe Console!');
+    console.log('🎉 [ADOBE] ¡Usuario procesado con éxito en la consola Federated de Adobe!');
     return true;
   } catch (error) {
     console.error('💥 [ADOBE ERROR SEGUIMIENTO FATAL]:');
