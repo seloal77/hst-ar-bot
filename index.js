@@ -46,7 +46,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
   // Control estricto de duplicados en ráfaga
   if (ticketsEnProceso.has(ticketKey)) {
-    console.log(`🛑 [ANTI-DUPLICADO] El ticket ${ticketKey} ya se está procesando de forma asíncrona. Ignorando esta ráfaga.`);
+    console.log(`🛑 [ANTI-DUPLICADO] El ticket ${ticketKey} ya se está procesando. Ignorando ráfaga duplicada.`);
     return res.status(200).send('Duplicate request ignored.');
   }
 
@@ -54,16 +54,15 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const idHijo = fields.customfield_10620?.id || fields.customfield_10620;
 
   if (currentStatus === 'Request Approved' && idPadre === '12362' && idHijo === '12350') {
-    console.log(`📬 [WEBHOOK JIRA] ¡Petición válida y única recibida para ${ticketKey}! Bloqueando entrada contra ráfagas...`);
+    console.log(`📬 [WEBHOOK JIRA] ¡Petición válida recibida para ${ticketKey}! Activando bloqueo...`);
     ticketsEnProceso.add(ticketKey);
 
-    // Respondemos rápido a Jira con un 200 para que se quede tranquilo y no reintente de forma agresiva
+    // Respondemos rápido a Jira con un 200 para mitigar el ansia de sus reintentos
     res.status(200).send('Processing started.');
 
     try {
       const userEmail = fields.customfield_10088;
       
-      // Mapeo dinámico de los campos del formulario de SEAT aportados
       const userFirstName = (fields.customfield_10189 || 'SEAT').trim();
       const userLastName = (fields.customfield_10190 || 'User').trim();
 
@@ -95,15 +94,19 @@ expressApp.post('/jira-webhook', async (req, res) => {
         return `SEAT_CUPRA_${paisNombre}_${brand}_Website_${permisoTexto}_IMS`;
       });
 
-      console.log(`👥 [ADOBE] Intentando asignar al usuario ${userEmail} (${userFirstName} ${userLastName}) los grupos:`, gruposAdobeFinales);
+      console.log(`👥 [ADOBE] Intentando asignar al usuario ${userEmail} los grupos:`, gruposAdobeFinales);
 
-      // Ejecución de la llamada
-      const adobeSuccess = await crearUsuarioEnAdobe(userEmail, userFirstName, userLastName, gruposAdobeFinales);
+      // La función ahora devuelve un objeto con el estado y el mensaje de error si lo hubiera
+      const resultadoAdobe = await crearUsuarioEnAdobe(userEmail, userFirstName, userLastName, gruposAdobeFinales);
 
-      const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
-      let comentarioJira = adobeSuccess 
-        ? `🤖 *[Bot]* User provisioning successfully managed in Adobe IMS.\n\n* *User:* ${userEmail}\n* *Name:* ${userFirstName} ${userLastName}\n* *Assigned Groups:* ${listaGruposTexto}`
-        : `⚠️ *[Bot]* Attention IT Team: Auto-provisioning failed in Adobe Admin Console. Please check Render logs.`;
+      let comentarioJira = '';
+      if (resultadoAdobe.success) {
+        const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
+        comentarioJira = `🤖 *[Bot]* User provisioning successfully managed in Adobe IMS.\n\n* *User:* ${userEmail}\n* *Name:* ${userFirstName} ${userLastName}\n* *Assigned Groups:* ${listaGruposTexto}`;
+      } else {
+        // MEJORA: Pasamos el error real directo al comentario de Jira
+        comentarioJira = `⚠️ *[Bot]* Auto-provisioning failed in Adobe Admin Console.\n\n* *Reason:* ${resultadoAdobe.errorReason}`;
+      }
       
       console.log('💬 [JIRA] Añadiendo el comentario definitivo al ticket...');
       await añadirComentarioJira(ticketKey, comentarioCompleto(comentarioJira));
@@ -111,9 +114,11 @@ expressApp.post('/jira-webhook', async (req, res) => {
     } catch (error) {
       console.error('💥 [ERROR CRÍTICO WEBHOOK]:', error.message);
     } finally {
-      // Liberamos el candado una vez ha terminado el circuito completo de comentarios y API
-      ticketsEnProceso.delete(ticketKey);
-      console.log(`🔓 [ANTI-DUPLICADO] Ticket ${ticketKey} desbloqueado.`);
+      // Mantenemos el ticket bloqueado en memoria 10 segundos enteros para destruir cualquier ráfaga rezagada de Jira
+      setTimeout(() => {
+        ticketsEnProceso.delete(ticketKey);
+        console.log(`🔓 [ANTI-DUPLICADO] El ticket ${ticketKey} ha sido desbloqueado de forma segura.`);
+      }, 10000);
     }
   } else {
     res.status(200).send('Conditions not met.');
@@ -170,7 +175,7 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 });
 
 // ==========================================
-// API REAL DE ADOBE (NORMATIVA VW FEDERATED ID)
+// API REAL DE ADOBE (RETORNA STATUS + ERROR)
 // ==========================================
 async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
   console.log('🔑 [ADOBE] Solicitando Token de acceso a Adobe Authentication...');
@@ -188,7 +193,6 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
 
     const adobeEndpoint = `https://usermanagement.adobe.io/v2/usermanagement/action/${process.env.ADOBE_ORG_ID}`;
     
-    // PAYLOAD INTEGRADO: Pasamos el nombre y el apellido reales leídos del formulario de JSM
     const adobePayload = [{
       "user": email,
       "do": [
@@ -215,30 +219,28 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
     
     console.log(`📥 [ADOBE] Respuesta recibida de la API:`, JSON.stringify(apiResponse.data));
 
-    // CONTROL INTELIGENTE DE ÉXITO: 
-    // Si da errores pero el motivo es puramente que ya existe el ID ("error.user.already_in_org"),
-    // la API de todas formas procesa la inyección del grupo. Por lo tanto, ¡SÍ ES UN OK!
     if (apiResponse.data?.completed === 0 && apiResponse.data?.errors?.length > 0) {
       const errorDetalle = apiResponse.data.errors[0];
+      
+      // El bypass de usuario existente se mantiene como un OK legítimo
       if (errorDetalle.errorCode === "error.user.already_in_org") {
-        console.log('ℹ️ [ADOBE SUCCESS BYPASS] El usuario ya existía en la Org, pero se le han asociado los grupos de forma correcta.');
-        return true;
+        console.log('ℹ️ [ADOBE SUCCESS BYPASS] El usuario ya existía, pero los grupos se asociaron correctamente.');
+        return { success: true };
       }
-      console.error('❌ [ADOBE] Error real e irreconciliable reportado por Adobe:', JSON.stringify(apiResponse.data.errors));
-      return false;
+      
+      console.error('❌ [ADOBE] Error reportado por Adobe:', errorDetalle.message);
+      return { success: false, errorReason: errorDetalle.message };
     }
 
     console.log('🎉 [ADOBE] ¡Usuario procesado con éxito en la consola Federated de Adobe!');
-    return true;
+    return { success: true };
   } catch (error) {
     console.error('💥 [ADOBE ERROR SEGUIMIENTO FATAL]:');
-    if (error.response) {
-      console.error(`- STATUS CODE EN ADOBE: ${error.response.status}`);
-      console.error(`- DETALLE ENVIADO POR ADOBE:`, JSON.stringify(error.response.data));
-    } else {
-      console.error(`- ERROR MENSAJE: ${error.message}`);
+    let msg = error.message;
+    if (error.response && error.response.data) {
+      msg = JSON.stringify(error.response.data);
     }
-    return false;
+    return { success: false, errorReason: msg };
   }
 }
 
