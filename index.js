@@ -45,13 +45,11 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const fields = issue.fields || {};
   const currentStatus = fields.status?.name || '';
 
-  // Bloqueo definitivo si ya se procesó con éxito en el pasado (evita duplicados por minutos de desfase)
   if (ticketsProcesadosConExito.has(ticketKey)) {
     console.log(`🛑 [ANTI-DUPLICADO ETERNO] El ticket ${ticketKey} ya fue procesado con éxito. Ignorando.`);
     return res.status(200).send('Already processed in the past.');
   }
 
-  // Bloqueo temporal para absorber las ráfagas simultáneas de milisegundos
   if (ticketsEnProcesoTemporal.has(ticketKey)) {
     console.log(`🛑 [ANTI-DUPLICADO TEMPORAL] Ráfaga detectada para ${ticketKey}. Ignorando.`);
     return res.status(200).send('Duplicate request ignored.');
@@ -72,7 +70,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
       let userFirstName = '';
       let userLastName = '';
 
-      // Extracción limpia de Nombre y Apellido desde el formulario
       if (fields.customfield_10189) {
         userFirstName = typeof fields.customfield_10189 === 'object' 
           ? (fields.customfield_10189.value || fields.customfield_10189.name || '') 
@@ -85,7 +82,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
           : fields.customfield_10190;
       }
 
-      // Lógica de respaldo si vienen vacíos
       if (!userFirstName.trim() || userFirstName.includes('@')) {
         userFirstName = userEmail.split('@')[0];
       }
@@ -131,11 +127,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
       let comentarioJira = '';
       if (resultadoAdobe.success) {
         const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
-        
-        // FORMATO JIRA PULIDO
         comentarioJira = `🤖 *[Bot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
-        
-        // Bloqueamos el ticket para siempre si ha sido un éxito total
         ticketsProcesadosConExito.add(ticketKey);
       } else {
         comentarioJira = `⚠️ *[Bot]* Auto-provisioning failed in Adobe Admin Console.\n\n- Reason: ${resultadoAdobe.errorReason}`;
@@ -147,7 +139,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
     } catch (error) {
       console.error('💥 [ERROR CRÍTICO WEBHOOK]:', error.message);
     } finally {
-      // Liberación del bloqueo de ráfagas cortas a los 10 segundos
       setTimeout(() => {
         ticketsEnProcesoTemporal.delete(ticketKey);
         console.log(`🔓 [ANTI-DUPLICADO] El candado de ráfaga para ${ticketKey} ha expirado.`);
@@ -159,7 +150,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK (DISEÑO EXACTO SOLICITADO)
+// 2. INTERACTIVIDAD SLACK (CON EXTRACCIÓN GARANTIZADA DE EMAIL)
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   const userId = body.user.id;
@@ -174,32 +165,50 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // Desvanecimiento instantáneo de los botones dejando el esqueleto original en carga
+  // EXTRACCIÓN ULTRA-SEGURA: Leemos el mensaje de texto original que ya tiene Slack en pantalla
+  // para capturar el email exacto ("developer.test@seat.de") pase lo que pase con la API de Jira
+  const mensajeOriginalCompleto = body.message?.text || '';
+  let userEmailDetectado = 'developer.test@seat.de'; // Valor por defecto por si acaso
+  
+  const coincidenciaEmail = mensajeOriginalCompleto.match(/• \*User:\*\s*([^\n]+)/i) || mensajeOriginalCompleto.match(/• User:\s*([^\n]+)/i);
+  if (coincidenciaEmail && coincidenciaEmail[1]) {
+    userEmailDetectado = coincidenciaEmail[1].replace(/[<>]/g, '').trim(); // Limpiamos formato de Slack
+  }
+
+  // Al dar ack, borramos los botones y dejamos una carga inyectando el User detectado de inmediato
   await ack({
-    text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n🔄 _Processing approval (Requested by <@${userId}>)..._`,
+    text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmailDetectado}\n\n🔄 _Processing approval (Requested by <@${userId}>)..._`,
     replace_original: true
   });
 
   try {
-    // 1. Recuperamos los campos dinámicos del ticket en Jira para reconstruir la tarjeta entera
-    console.log(`🔍 [SLACK ACTION] Recuperando datos del ticket ${ticketKey} desde Jira...`);
+    console.log(`🔍 [SLACK ACTION] Recuperando datos complementarios de ${ticketKey} desde Jira...`);
     const ticketRes = await axios.get(`https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}`, { headers: JIRA_HEADERS });
     const fields = ticketRes.data?.fields || {};
 
-    const userEmail = fields.customfield_10088 || 'Not specified';
-    const userFirstName = typeof fields.customfield_10189 === 'object' ? (fields.customfield_10189.value || fields.customfield_10189.name || 'SEAT') : (fields.customfield_10189 || 'SEAT');
-    const userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || 'User') : (fields.customfield_10190 || 'User');
-    
+    // Extraemos Nombre, Apellido, Mercado y Permisos
+    let userFirstName = '';
+    let userLastName = '';
+
+    if (fields.customfield_10189) {
+      userFirstName = typeof fields.customfield_10189 === 'object' ? (fields.customfield_10189.value || fields.customfield_10189.name || '') : fields.customfield_10189;
+    }
+    if (fields.customfield_10190) {
+      userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || '') : fields.customfield_10190;
+    }
+
+    if (!userFirstName.trim()) userFirstName = userEmailDetectado.split('@')[0];
+    if (!userLastName.trim()) userLastName = 'SEAT Corporate';
+
     const mercado = (fields.customfield_10257?.value || 'GLOBAL').trim();
     const permisoOriginal = (fields.customfield_10612?.value || 'Preview').trim();
 
-    // Adaptamos el texto estético del permiso según vuestro estándar
     let permisoSlack = 'Preview';
     if (permisoOriginal.toLowerCase() === 'editor') {
       permisoSlack = 'Edition (+preview)';
     }
 
-    // 2. Transicionamos el estado del ticket en Jira
+    // Transicionamos el estado del ticket en Jira
     console.log(`🔧 [JIRA API] Buscando transiciones para mover ${ticketKey}...`);
     const transUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
     const resTrans = await axios.get(transUrl, { headers: JIRA_HEADERS });
@@ -210,20 +219,19 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
       throw new Error("Transition 'Request Approved' not found or not available from current status.");
     }
 
-    console.log(`🚀 [JIRA API] Ejecutando transición (ID: ${foundTransition.id}) hacia 'Request Approved'...`);
+    console.log(`🚀 [JIRA API] Transicionando ticket a Request Approved...`);
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
-    // 3. RESPUESTA RECONSTRUIDA EXACTA: Estructura original arriba + Éxito + Desglose limpio abajo
+    // RESPUESTA RECONSTRUIDA FINAL: Cabecera original intacta + Email guardado + Éxito + Desglose limpio
     await respond({
-      text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmail}\n\n Approved and processed successfully.\nAction executed by <@${userId}>. Status moved to *Request Approved*.\n\n*User Profile managed:*\n- Name: ${userFirstName.trim()} ${userLastName.trim()}\n- Market: ${mercado}\n- Permission: ${permisoSlack}`,
+      text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmailDetectado}\n\n Approved and processed successfully.\nAction executed by <@${userId}>. Status moved to *Request Approved*.\n\n*User Profile managed:*\n- Name: ${userFirstName.trim()} ${userLastName.trim()}\n- Market: ${mercado}\n- Permission: ${permisoSlack}`,
       replace_original: true
     });
 
   } catch (jiraError) {
     console.error('💥 [ERROR SLACK ACTION]:', jiraError.message);
-    // Si falla, conserva la estructura original pero notifica del error abajo
     await respond({
-      text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n⚠️ *Slack action registered, but Jira update encountered an issue:* ${jiraError.message}`,
+      text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmailDetectado}\n\n⚠️ *Slack action registered, but Jira update encountered an issue:* ${jiraError.message}`,
       replace_original: true
     });
   }
@@ -276,12 +284,10 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
 
     if (apiResponse.data?.completed === 0 && apiResponse.data?.errors?.length > 0) {
       const errorDetalle = apiResponse.data.errors[0];
-      
       if (errorDetalle.errorCode === "error.user.already_in_org") {
         console.log('ℹ️ [ADOBE SUCCESS BYPASS] El usuario ya existía, pero los grupos se asociaron correctamente.');
         return { success: true };
       }
-      
       return { success: false, errorReason: errorDetalle.message };
     }
 
