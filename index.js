@@ -12,8 +12,7 @@ const JIRA_HEADERS = {
   'Content-Type': 'application/json'
 };
 
-// Modificado: Este registro almacena los tickets ya procesados con éxito de forma definitiva 
-// para evitar duplicados tardíos (como el del salto de minuto 20:48 a 20:49)
+// Registro de memoria permanente y temporal contra duplicados de Jira
 const ticketsProcesadosConExito = new Set();
 const ticketsEnProcesoTemporal = new Set();
 
@@ -46,13 +45,13 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const fields = issue.fields || {};
   const currentStatus = fields.status?.name || '';
 
-  // 1. Bloqueo definitivo si ya se puso el comentario de OK en el pasado
+  // Bloqueo definitivo si ya se procesó con éxito en el pasado (evita duplicados por minutos de desfase)
   if (ticketsProcesadosConExito.has(ticketKey)) {
-    console.log(`🛑 [ANTI-DUPLICADO ETERNO] El ticket ${ticketKey} ya fue procesado con éxito anteriormente. Ignorando petición tardía.`);
+    console.log(`🛑 [ANTI-DUPLICADO ETERNO] El ticket ${ticketKey} ya fue procesado con éxito. Ignorando.`);
     return res.status(200).send('Already processed in the past.');
   }
 
-  // 2. Bloqueo temporal para la ráfaga inicial de milisegundos
+  // Bloqueo temporal para absorber las ráfagas simultáneas de milisegundos
   if (ticketsEnProcesoTemporal.has(ticketKey)) {
     console.log(`🛑 [ANTI-DUPLICADO TEMPORAL] Ráfaga detectada para ${ticketKey}. Ignorando.`);
     return res.status(200).send('Duplicate request ignored.');
@@ -73,6 +72,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
       let userFirstName = '';
       let userLastName = '';
 
+      // Extracción limpia de Nombre y Apellido desde el formulario
       if (fields.customfield_10189) {
         userFirstName = typeof fields.customfield_10189 === 'object' 
           ? (fields.customfield_10189.value || fields.customfield_10189.name || '') 
@@ -85,6 +85,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
           : fields.customfield_10190;
       }
 
+      // Lógica de respaldo si vienen vacíos
       if (!userFirstName.trim() || userFirstName.includes('@')) {
         userFirstName = userEmail.split('@')[0];
       }
@@ -131,10 +132,10 @@ expressApp.post('/jira-webhook', async (req, res) => {
       if (resultadoAdobe.success) {
         const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
         
-        // FORMATO NUEVO SOLICITADO: Cambiado titular y viñetas sin asteriscos
+        // FORMATO PULIDO: Sin asteriscos en las viñetas y nuevo titular
         comentarioJira = `🤖 *[Bot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
         
-        // Si ha ido bien, marcamos este ticket como inmune para siempre
+        // Bloqueamos el ticket para siempre si ha sido un éxito total
         ticketsProcesadosConExito.add(ticketKey);
       } else {
         comentarioJira = `⚠️ *[Bot]* Auto-provisioning failed in Adobe Admin Console.\n\n- Reason: ${resultadoAdobe.errorReason}`;
@@ -146,7 +147,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
     } catch (error) {
       console.error('💥 [ERROR CRÍTICO WEBHOOK]:', error.message);
     } finally {
-      // Liberación de la caché de ráfaga corta a los 10 segundos
+      // Liberación del bloqueo de ráfagas cortas a los 10 segundos
       setTimeout(() => {
         ticketsEnProcesoTemporal.delete(ticketKey);
         console.log(`🔓 [ANTI-DUPLICADO] El candado de ráfaga para ${ticketKey} ha expirado.`);
@@ -158,10 +159,9 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK
+// 2. INTERACTIVIDAD SLACK (AUTODESTRUCCIÓN DE CTA DE INMEDIATO)
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
-  await ack(); 
   const userId = body.user.id;
   const ticketKey = body.actions[0].value; 
   const ticketUrl = `https://${process.env.JIRA_DOMAIN}/browse/${ticketKey}`;
@@ -170,10 +170,13 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 
   if (ALLOWED_APPROVERS.length > 0 && !ALLOWED_APPROVERS.includes(userId)) {
     console.log(`❌ [SLACK] Acceso denegado. <@${userId}> no está en ALLOWED_APPROVERS.`);
+    await ack(); 
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  await respond({
+  // FIJADO AQUÍ: Al responder el 'ack' con el texto y el replace_original, Slack
+  // elimina el bloque de botones de forma instantánea en la interfaz del usuario.
+  await ack({
     text: `🔄 *Processing approval for <${ticketUrl}|${ticketKey}> (Requested by <@${userId}>)...*`,
     replace_original: true
   });
@@ -192,6 +195,7 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     console.log(`🚀 [JIRA API] Ejecutando transición (ID: ${foundTransition.id}) hacia 'Request Approved'...`);
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
+    // Actualización final del texto de carga a mensaje completado
     await respond({
       text: `✅ *Approved: <${ticketUrl}|${ticketKey}> has been processed.*\nAction executed in Jira by <@${userId}>. Status moved to *Request Approved*.`,
       replace_original: true
