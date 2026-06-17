@@ -57,14 +57,37 @@ expressApp.post('/jira-webhook', async (req, res) => {
     console.log(`📬 [WEBHOOK JIRA] ¡Petición válida recibida para ${ticketKey}! Activando bloqueo...`);
     ticketsEnProceso.add(ticketKey);
 
-    // Respondemos rápido a Jira con un 200 para mitigar el ansia de sus reintentos
     res.status(200).send('Processing started.');
 
     try {
       const userEmail = fields.customfield_10088;
       
-      const userFirstName = (fields.customfield_10189 || 'SEAT').trim();
-      const userLastName = (fields.customfield_10190 || 'User').trim();
+      // Extracción ultra-segura de Nombre y Apellido desde Jira
+      let userFirstName = '';
+      let userLastName = '';
+
+      if (fields.customfield_10189) {
+        userFirstName = typeof fields.customfield_10189 === 'object' 
+          ? (fields.customfield_10189.value || fields.customfield_10189.name || '') 
+          : fields.customfield_10189;
+      }
+      
+      if (fields.customfield_10190) {
+        userLastName = typeof fields.customfield_10190 === 'object' 
+          ? (fields.customfield_10190.value || fields.customfield_10190.name || '') 
+          : fields.customfield_10190;
+      }
+
+      // Salvavidas por si el formulario no trae los campos rellenos
+      if (!userFirstName.trim() || userFirstName.includes('@')) {
+        userFirstName = userEmail.split('@')[0];
+      }
+      if (!userLastName.trim() || userLastName.includes('@')) {
+        userLastName = 'SEAT Corporate';
+      }
+
+      userFirstName = userFirstName.trim();
+      userLastName = userLastName.trim();
 
       const campoPais = fields.customfield_10257; 
       const campoMarca = fields.customfield_10320; 
@@ -96,7 +119,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
       console.log(`👥 [ADOBE] Intentando asignar al usuario ${userEmail} los grupos:`, gruposAdobeFinales);
 
-      // La función ahora devuelve un objeto con el estado y el mensaje de error si lo hubiera
       const resultadoAdobe = await crearUsuarioEnAdobe(userEmail, userFirstName, userLastName, gruposAdobeFinales);
 
       let comentarioJira = '';
@@ -104,7 +126,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
         const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
         comentarioJira = `🤖 *[Bot]* User provisioning successfully managed in Adobe IMS.\n\n* *User:* ${userEmail}\n* *Name:* ${userFirstName} ${userLastName}\n* *Assigned Groups:* ${listaGruposTexto}`;
       } else {
-        // MEJORA: Pasamos el error real directo al comentario de Jira
         comentarioJira = `⚠️ *[Bot]* Auto-provisioning failed in Adobe Admin Console.\n\n* *Reason:* ${resultadoAdobe.errorReason}`;
       }
       
@@ -114,7 +135,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
     } catch (error) {
       console.error('💥 [ERROR CRÍTICO WEBHOOK]:', error.message);
     } finally {
-      // Mantenemos el ticket bloqueado en memoria 10 segundos enteros para destruir cualquier ráfaga rezagada de Jira
+      // Bloqueo de 10 segundos para absorber ráfagas de Jira
       setTimeout(() => {
         ticketsEnProceso.delete(ticketKey);
         console.log(`🔓 [ANTI-DUPLICADO] El ticket ${ticketKey} ha sido desbloqueado de forma segura.`);
@@ -126,7 +147,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK
+// 2. INTERACTIVIDAD SLACK (CON REEMPLAZO DE MENSAJE)
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   await ack(); 
@@ -138,12 +159,15 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 
   if (ALLOWED_APPROVERS.length > 0 && !ALLOWED_APPROVERS.includes(userId)) {
     console.log(`❌ [SLACK] Acceso denegado. <@${userId}> no está en ALLOWED_APPROVERS.`);
+    // En este caso no reemplazamos el original, solo mandamos un aviso efímero al usuario intruso
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
+  // MODIFICADO: Cambiamos a replace_original: true. Al hacer clic, los botones desaparecen inmediatamente
+  // y el mensaje se convierte en un texto de carga. Nadie más podrá volver a pulsarlo.
   await respond({
-    text: `🔄 *Processing approval for <${ticketUrl}|${ticketKey}>...*`,
-    replace_original: false
+    text: `🔄 *Processing approval for <${ticketUrl}|${ticketKey}> (Requested by <@${userId}>)...*`,
+    replace_original: true
   });
 
   try {
@@ -160,16 +184,18 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     console.log(`🚀 [JIRA API] Ejecutando transición (ID: ${foundTransition.id}) hacia 'Request Approved'...`);
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
+    // Confirmación final sobre el mismo mensaje original (sin botones)
     await respond({
-      text: `✅ *Action registered for <${ticketUrl}|${ticketKey}> by <@${userId}>.*\nTicket status successfully moved to *Request Approved* in Jira.`,
-      replace_original: false
+      text: `✅ *Approved: <${ticketUrl}|${ticketKey}> has been processed.*\nAction executed in Jira by <@${userId}>. Status moved to *Request Approved*.`,
+      replace_original: true
     });
 
   } catch (jiraError) {
     console.error('💥 [ERROR SLACK ACTION]:', jiraError.message);
+    // Si falla Jira, dejamos constancia en el mismo bloque para saber que hubo un error técnico
     await respond({
-      text: `⚠️ *Approved in Slack, but Jira couldn't update automatically:* ${jiraError.message}`,
-      replace_original: false
+      text: `⚠️ *Slack action registered, but Jira update encountered an issue:* ${jiraError.message}`,
+      replace_original: true
     });
   }
 });
@@ -222,13 +248,11 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
     if (apiResponse.data?.completed === 0 && apiResponse.data?.errors?.length > 0) {
       const errorDetalle = apiResponse.data.errors[0];
       
-      // El bypass de usuario existente se mantiene como un OK legítimo
       if (errorDetalle.errorCode === "error.user.already_in_org") {
         console.log('ℹ️ [ADOBE SUCCESS BYPASS] El usuario ya existía, pero los grupos se asociaron correctamente.');
         return { success: true };
       }
       
-      console.error('❌ [ADOBE] Error reportado por Adobe:', errorDetalle.message);
       return { success: false, errorReason: errorDetalle.message };
     }
 
@@ -257,6 +281,8 @@ function comentarioCompleto(texto) {
     }
   };
 }
+
+expressApp.use(express.json());
 
 expressApp.listen(PORT, () => {
   console.log(`🚀 IT Orchestrator running stably on port ${PORT}`);
