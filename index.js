@@ -94,7 +94,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK: MANTIENE EL MENSAJE ANTERIOR
+// 2. INTERACTIVIDAD SLACK: REGISTRA LA ACCIÓN LIMPIAMENTE
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   await ack(); 
@@ -106,8 +106,8 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // Al usar replace_original: false, Slack no destruye el mensaje que contiene los datos del ticket.
-  // Envía esta confirmación justo debajo, manteniendo visible toda la información anterior.
+  // Notificamos en Slack que la acción se ha registrado de forma local.
+  // El mensaje original de Slack se mantendrá intacto gracias a 'replace_original: false'
   await respond({
     text: `✅ *Action registered for <${ticketUrl}|${ticketKey}> by <@${userId}>.*\nProceeding with Adobe IMS matrix provisioning...`,
     replace_original: false
