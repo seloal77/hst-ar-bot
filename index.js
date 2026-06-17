@@ -61,7 +61,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const idHijo = fields.customfield_10620?.id || fields.customfield_10620;
 
   if (currentStatus === 'Request Approved' && idPadre === '12362' && idHijo === '12350') {
-    console.log(`📬 [WEBHOOK JIRA] ¡Petición válida recibida para ${ticketKey}! Activando bloqueos...`);
+    console.log(`📬 [WEBHOOK JIRA] ¡Petición válida recibida para ${ticketKey}! Activando boxeos...`);
     ticketsEnProcesoTemporal.add(ticketKey);
 
     res.status(200).send('Processing started.');
@@ -159,7 +159,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK (AUTODESTRUCCIÓN DE CTA DE INMEDIATO)
+// 2. INTERACTIVIDAD SLACK (CON DESGLOSE COMPLETO EN MENSAJE)
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   const userId = body.user.id;
@@ -174,14 +174,26 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // FIJADO AQUÍ: Al responder el 'ack' con el texto y el replace_original, Slack
-  // elimina el bloque de botones de forma instantánea en la interfaz del usuario.
+  // Al responder el 'ack' con el replace_original: true, los botones desaparecen inmediatamente
   await ack({
     text: `🔄 *Processing approval for <${ticketUrl}|${ticketKey}> (Requested by <@${userId}>)...*`,
     replace_original: true
   });
 
   try {
+    // 1. Recuperamos los campos dinámicos del ticket en Jira para pintarlos en Slack
+    console.log(`🔍 [SLACK ACTION] Recuperando datos del ticket ${ticketKey} desde Jira...`);
+    const ticketRes = await axios.get(`https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}`, { headers: JIRA_HEADERS });
+    const fields = ticketRes.data?.fields || {};
+
+    const userEmail = fields.customfield_10088 || 'Not specified';
+    const userFirstName = typeof fields.customfield_10189 === 'object' ? (fields.customfield_10189.value || fields.customfield_10189.name || 'SEAT') : (fields.customfield_10189 || 'SEAT');
+    const userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || 'User') : (fields.customfield_10190 || 'User');
+    
+    const mercado = (fields.customfield_10257?.value || 'GLOBAL').trim();
+    const permiso = (fields.customfield_10612?.value || 'Preview').trim();
+
+    // 2. Transicionamos el estado del ticket en Jira
     console.log(`🔧 [JIRA API] Buscando transiciones para mover ${ticketKey}...`);
     const transUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
     const resTrans = await axios.get(transUrl, { headers: JIRA_HEADERS });
@@ -195,9 +207,9 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     console.log(`🚀 [JIRA API] Ejecutando transición (ID: ${foundTransition.id}) hacia 'Request Approved'...`);
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
-    // Actualización final del texto de carga a mensaje completado
+    // 3. Respuesta e inyección final del perfil completo en la tarjeta editada de Slack
     await respond({
-      text: `✅ *Approved: <${ticketUrl}|${ticketKey}> has been processed.*\nAction executed in Jira by <@${userId}>. Status moved to *Request Approved*.`,
+      text: `✅ *Approved: <${ticketUrl}|${ticketKey}> has been processed.*\nAction executed in Jira by <@${userId}>. Status moved to *Request Approved*.\n\n*User Profile managed:*\n- Mail: ${userEmail}\n- Name: ${userFirstName.trim()} ${userLastName.trim()}\n- Market: ${mercado}\n- Permission: ${permiso}`,
       replace_original: true
     });
 
