@@ -150,43 +150,42 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK (CON EXTRACCIÓN GARANTIZADA DE EMAIL)
+// 2. INTERACTIVIDAD SLACK (DATA DE BOTÓN NATIVA)
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   const userId = body.user.id;
-  const ticketKey = body.actions[0].value; 
-  const ticketUrl = `https://${process.env.JIRA_DOMAIN}/browse/${ticketKey}`;
+  
+  // MODIFICACIÓN DE EXTRACCIÓN: Soportamos tanto el formato antiguo como el nuevo combinado
+  const botonValorRaw = body.actions[0].value || ''; 
+  let ticketKey = botonValorRaw;
+  let userEmailDetectado = 'developer.test@seat.de'; // Respaldo estático solicitado
 
-  console.log(`🖱️ [SLACK] ¡Botón clicado por <@${userId}> para el ticket ${ticketKey}!`);
+  if (botonValorRaw.includes('_')) {
+    const partes = botonValorRaw.split('_');
+    ticketKey = partes[0];
+    userEmailDetectado = partes[1];
+  }
+
+  const ticketUrl = `https://${process.env.JIRA_DOMAIN}/browse/${ticketKey}`;
+  console.log(`🖱️ [SLACK] Clic detectado para ticket ${ticketKey} y usuario ${userEmailDetectado}`);
 
   if (ALLOWED_APPROVERS.length > 0 && !ALLOWED_APPROVERS.includes(userId)) {
-    console.log(`❌ [SLACK] Acceso denegado. <@${userId}> no está en ALLOWED_APPROVERS.`);
+    console.log(`❌ [SLACK] Acceso denegado a <@${userId}>.`);
     await ack(); 
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // EXTRACCIÓN ULTRA-SEGURA: Leemos el mensaje de texto original que ya tiene Slack en pantalla
-  // para capturar el email exacto ("developer.test@seat.de") pase lo que pase con la API de Jira
-  const mensajeOriginalCompleto = body.message?.text || '';
-  let userEmailDetectado = 'developer.test@seat.de'; // Valor por defecto por si acaso
-  
-  const coincidenciaEmail = mensajeOriginalCompleto.match(/• \*User:\*\s*([^\n]+)/i) || mensajeOriginalCompleto.match(/• User:\s*([^\n]+)/i);
-  if (coincidenciaEmail && coincidenciaEmail[1]) {
-    userEmailDetectado = coincidenciaEmail[1].replace(/[<>]/g, '').trim(); // Limpiamos formato de Slack
-  }
-
-  // Al dar ack, borramos los botones y dejamos una carga inyectando el User detectado de inmediato
+  // Primera respuesta rápida: destruimos los botones manteniendo intacto el bloque superior
   await ack({
     text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmailDetectado}\n\n🔄 _Processing approval (Requested by <@${userId}>)..._`,
     replace_original: true
   });
 
   try {
-    console.log(`🔍 [SLACK ACTION] Recuperando datos complementarios de ${ticketKey} desde Jira...`);
+    console.log(`🔍 [SLACK ACTION] Consultando detalles del ticket ${ticketKey} en Jira...`);
     const ticketRes = await axios.get(`https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}`, { headers: JIRA_HEADERS });
     const fields = ticketRes.data?.fields || {};
 
-    // Extraemos Nombre, Apellido, Mercado y Permisos
     let userFirstName = '';
     let userLastName = '';
 
@@ -208,21 +207,18 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
       permisoSlack = 'Edition (+preview)';
     }
 
-    // Transicionamos el estado del ticket en Jira
-    console.log(`🔧 [JIRA API] Buscando transiciones para mover ${ticketKey}...`);
+    console.log(`🔧 [JIRA API] Transicionando estado de ${ticketKey}...`);
     const transUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
     const resTrans = await axios.get(transUrl, { headers: JIRA_HEADERS });
     
     const foundTransition = resTrans.data.transitions.find(t => t.name.toLowerCase() === 'request approved');
-
     if (!foundTransition) {
-      throw new Error("Transition 'Request Approved' not found or not available from current status.");
+      throw new Error("Transition 'Request Approved' not found.");
     }
 
-    console.log(`🚀 [JIRA API] Transicionando ticket a Request Approved...`);
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
-    // RESPUESTA RECONSTRUIDA FINAL: Cabecera original intacta + Email guardado + Éxito + Desglose limpio
+    // RESPUESTA DEFINITIVA RECONSTRUIDA: Mantiene exactamente la cabecera con el email inyectado de forma nativa
     await respond({
       text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmailDetectado}\n\n Approved and processed successfully.\nAction executed by <@${userId}>. Status moved to *Request Approved*.\n\n*User Profile managed:*\n- Name: ${userFirstName.trim()} ${userLastName.trim()}\n- Market: ${mercado}\n- Permission: ${permisoSlack}`,
       replace_original: true
@@ -241,7 +237,6 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 // API REAL DE ADOBE (RETORNA STATUS + ERROR)
 // ==========================================
 async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
-  console.log('🔑 [ADOBE] Solicitando Token de acceso a Adobe Authentication...');
   try {
     const tokenUrl = 'https://ims-na1.adobelogin.com/ims/token/v3';
     const params = new URLSearchParams();
@@ -252,7 +247,6 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
 
     const tokenResponse = await axios.post(tokenUrl, params, { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
     const accessToken = tokenResponse.data.access_token;
-    console.log('🎫 [ADOBE] Token generado correctamente.');
 
     const adobeEndpoint = `https://usermanagement.adobe.io/v2/usermanagement/action/${process.env.ADOBE_ORG_ID}`;
     
@@ -275,30 +269,22 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
       ]
     }];
 
-    console.log(`📡 [ADOBE] Enviando petición final de alta al Endpoint de Adobe...`);
     const apiResponse = await axios.post(adobeEndpoint, adobePayload, {
       headers: { 'Authorization': `Bearer ${accessToken}`, 'X-Api-Key': process.env.ADOBE_CLIENT_ID, 'Content-Type': 'application/json' }
     });
-    
-    console.log(`📥 [ADOBE] Respuesta recibida de la API:`, JSON.stringify(apiResponse.data));
 
     if (apiResponse.data?.completed === 0 && apiResponse.data?.errors?.length > 0) {
       const errorDetalle = apiResponse.data.errors[0];
       if (errorDetalle.errorCode === "error.user.already_in_org") {
-        console.log('ℹ️ [ADOBE SUCCESS BYPASS] El usuario ya existía, pero los grupos se asociaron correctamente.');
         return { success: true };
       }
       return { success: false, errorReason: errorDetalle.message };
     }
 
-    console.log('🎉 [ADOBE] ¡Usuario procesado con éxito en la consola Federated de Adobe!');
     return { success: true };
   } catch (error) {
-    console.error('💥 [ADOBE ERROR SEGUIMIENTO FATAL]:');
     let msg = error.message;
-    if (error.response && error.response.data) {
-      msg = JSON.stringify(error.response.data);
-    }
+    if (error.response && error.response.data) msg = JSON.stringify(error.response.data);
     return { success: false, errorReason: msg };
   }
 }
