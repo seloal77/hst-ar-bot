@@ -87,7 +87,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
       console.log(`👥 [ADOBE] Intentando asignar al usuario ${userEmail} los grupos:`, gruposAdobeFinales);
 
-      // Llamada corregida a la API corporativa de Adobe
+      // Llamada corregida a la API de Adobe
       const adobeSuccess = await crearUsuarioEnAdobe(userEmail, gruposAdobeFinales);
 
       const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
@@ -158,7 +158,7 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 });
 
 // ==========================================
-// API REAL DE ADOBE (CORREGIDA PARA EMOPRESAS)
+// API REAL DE ADOBE (MODIFICADA SIN CREATEADOBEID)
 // ==========================================
 async function crearUsuarioEnAdobe(email, grupos) {
   console.log('🔑 [ADOBE] Solicitando Token de acceso a Adobe Authentication...');
@@ -176,7 +176,7 @@ async function crearUsuarioEnAdobe(email, grupos) {
 
     const adobeEndpoint = `https://usermanagement.adobe.io/v2/usermanagement/action/${process.env.ADOBE_ORG_ID}`;
     
-    // PAYLOAD EMPRESARIAL SEAT: Quitamos createAdobeID para evitar conflictos con Federated/Enterprise IDs
+    // PAYLOAD CORREGIDO: Eliminamos createAdobeID para que use Federated/Enterprise ID y no de error
     const adobePayload = [{
       "user": email,
       "do": [
