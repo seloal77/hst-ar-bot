@@ -12,8 +12,10 @@ const JIRA_HEADERS = {
   'Content-Type': 'application/json'
 };
 
-// Sistema de memoria temporal para bloquear duplicados y ráfagas concurrentes de Jira
-const ticketsEnProceso = new Set();
+// Modificado: Este registro almacena los tickets ya procesados con éxito de forma definitiva 
+// para evitar duplicados tardíos (como el del salto de minuto 20:48 a 20:49)
+const ticketsProcesadosConExito = new Set();
+const ticketsEnProcesoTemporal = new Set();
 
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET || 'dummy_secret',
@@ -44,9 +46,15 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const fields = issue.fields || {};
   const currentStatus = fields.status?.name || '';
 
-  // Control estricto de duplicados en ráfaga
-  if (ticketsEnProceso.has(ticketKey)) {
-    console.log(`🛑 [ANTI-DUPLICADO] El ticket ${ticketKey} ya se está procesando. Ignorando ráfaga duplicada.`);
+  // 1. Bloqueo definitivo si ya se puso el comentario de OK en el pasado
+  if (ticketsProcesadosConExito.has(ticketKey)) {
+    console.log(`🛑 [ANTI-DUPLICADO ETERNO] El ticket ${ticketKey} ya fue procesado con éxito anteriormente. Ignorando petición tardía.`);
+    return res.status(200).send('Already processed in the past.');
+  }
+
+  // 2. Bloqueo temporal para la ráfaga inicial de milisegundos
+  if (ticketsEnProcesoTemporal.has(ticketKey)) {
+    console.log(`🛑 [ANTI-DUPLICADO TEMPORAL] Ráfaga detectada para ${ticketKey}. Ignorando.`);
     return res.status(200).send('Duplicate request ignored.');
   }
 
@@ -54,15 +62,14 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const idHijo = fields.customfield_10620?.id || fields.customfield_10620;
 
   if (currentStatus === 'Request Approved' && idPadre === '12362' && idHijo === '12350') {
-    console.log(`📬 [WEBHOOK JIRA] ¡Petición válida recibida para ${ticketKey}! Activando bloqueo...`);
-    ticketsEnProceso.add(ticketKey);
+    console.log(`📬 [WEBHOOK JIRA] ¡Petición válida recibida para ${ticketKey}! Activando bloqueos...`);
+    ticketsEnProcesoTemporal.add(ticketKey);
 
     res.status(200).send('Processing started.');
 
     try {
       const userEmail = fields.customfield_10088;
       
-      // Extracción ultra-segura de Nombre y Apellido desde Jira
       let userFirstName = '';
       let userLastName = '';
 
@@ -78,7 +85,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
           : fields.customfield_10190;
       }
 
-      // Salvavidas por si el formulario no trae los campos rellenos
       if (!userFirstName.trim() || userFirstName.includes('@')) {
         userFirstName = userEmail.split('@')[0];
       }
@@ -109,7 +115,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
       if (marcasAAgregar.length === 0) {
         console.log('⚠️ [ERROR] No se han detectado marcas válidas en el ticket.');
-        ticketsEnProceso.delete(ticketKey);
+        ticketsEnProcesoTemporal.delete(ticketKey);
         return;
       }
 
@@ -124,9 +130,14 @@ expressApp.post('/jira-webhook', async (req, res) => {
       let comentarioJira = '';
       if (resultadoAdobe.success) {
         const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
-        comentarioJira = `🤖 *[Bot]* User provisioning successfully managed in Adobe IMS.\n\n* *User:* ${userEmail}\n* *Name:* ${userFirstName} ${userLastName}\n* *Assigned Groups:* ${listaGruposTexto}`;
+        
+        // FORMATO NUEVO SOLICITADO: Cambiado titular y viñetas sin asteriscos
+        comentarioJira = `🤖 *[Bot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
+        
+        // Si ha ido bien, marcamos este ticket como inmune para siempre
+        ticketsProcesadosConExito.add(ticketKey);
       } else {
-        comentarioJira = `⚠️ *[Bot]* Auto-provisioning failed in Adobe Admin Console.\n\n* *Reason:* ${resultadoAdobe.errorReason}`;
+        comentarioJira = `⚠️ *[Bot]* Auto-provisioning failed in Adobe Admin Console.\n\n- Reason: ${resultadoAdobe.errorReason}`;
       }
       
       console.log('💬 [JIRA] Añadiendo el comentario definitivo al ticket...');
@@ -135,10 +146,10 @@ expressApp.post('/jira-webhook', async (req, res) => {
     } catch (error) {
       console.error('💥 [ERROR CRÍTICO WEBHOOK]:', error.message);
     } finally {
-      // Bloqueo de 10 segundos para absorber ráfagas de Jira
+      // Liberación de la caché de ráfaga corta a los 10 segundos
       setTimeout(() => {
-        ticketsEnProceso.delete(ticketKey);
-        console.log(`🔓 [ANTI-DUPLICADO] El ticket ${ticketKey} ha sido desbloqueado de forma segura.`);
+        ticketsEnProcesoTemporal.delete(ticketKey);
+        console.log(`🔓 [ANTI-DUPLICADO] El candado de ráfaga para ${ticketKey} ha expirado.`);
       }, 10000);
     }
   } else {
@@ -147,7 +158,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK (CON REEMPLAZO DE MENSAJE)
+// 2. INTERACTIVIDAD SLACK
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   await ack(); 
@@ -159,12 +170,9 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 
   if (ALLOWED_APPROVERS.length > 0 && !ALLOWED_APPROVERS.includes(userId)) {
     console.log(`❌ [SLACK] Acceso denegado. <@${userId}> no está en ALLOWED_APPROVERS.`);
-    // En este caso no reemplazamos el original, solo mandamos un aviso efímero al usuario intruso
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // MODIFICADO: Cambiamos a replace_original: true. Al hacer clic, los botones desaparecen inmediatamente
-  // y el mensaje se convierte en un texto de carga. Nadie más podrá volver a pulsarlo.
   await respond({
     text: `🔄 *Processing approval for <${ticketUrl}|${ticketKey}> (Requested by <@${userId}>)...*`,
     replace_original: true
@@ -184,7 +192,6 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     console.log(`🚀 [JIRA API] Ejecutando transición (ID: ${foundTransition.id}) hacia 'Request Approved'...`);
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
-    // Confirmación final sobre el mismo mensaje original (sin botones)
     await respond({
       text: `✅ *Approved: <${ticketUrl}|${ticketKey}> has been processed.*\nAction executed in Jira by <@${userId}>. Status moved to *Request Approved*.`,
       replace_original: true
@@ -192,7 +199,6 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 
   } catch (jiraError) {
     console.error('💥 [ERROR SLACK ACTION]:', jiraError.message);
-    // Si falla Jira, dejamos constancia en el mismo bloque para saber que hubo un error técnico
     await respond({
       text: `⚠️ *Slack action registered, but Jira update encountered an issue:* ${jiraError.message}`,
       replace_original: true
@@ -281,8 +287,6 @@ function comentarioCompleto(texto) {
     }
   };
 }
-
-expressApp.use(express.json());
 
 expressApp.listen(PORT, () => {
   console.log(`🚀 IT Orchestrator running stably on port ${PORT}`);
