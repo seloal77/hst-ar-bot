@@ -61,7 +61,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const idHijo = fields.customfield_10620?.id || fields.customfield_10620;
 
   if (currentStatus === 'Request Approved' && idPadre === '12362' && idHijo === '12350') {
-    console.log(`📬 [WEBHOOK JIRA] ¡Petición válida recibida para ${ticketKey}! Activando boxeos...`);
+    console.log(`📬 [WEBHOOK JIRA] ¡Petición válida recibida para ${ticketKey}! Activando bloqueos...`);
     ticketsEnProcesoTemporal.add(ticketKey);
 
     res.status(200).send('Processing started.');
@@ -159,7 +159,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK (CON DESGLOSE COMPLETO EN MENSAJE)
+// 2. INTERACTIVIDAD SLACK (CONSERVANDO ENCABEZADO ORIGINAL)
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   const userId = body.user.id;
@@ -174,14 +174,14 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // Al responder el 'ack' con el replace_original: true, los botones desaparecen inmediatamente
+  // Al dar ack, borramos los botones y dejamos una carga manteniendo el título original
   await ack({
-    text: `🔄 *Processing approval for <${ticketUrl}|${ticketKey}> (Requested by <@${userId}>)...*`,
+    text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n🔄 _Processing approval (Requested by <@${userId}>)..._`,
     replace_original: true
   });
 
   try {
-    // 1. Recuperamos los campos dinámicos del ticket en Jira para pintarlos en Slack
+    // Recuperamos los campos dinámicos del ticket en Jira para reconstruir el mensaje
     console.log(`🔍 [SLACK ACTION] Recuperando datos del ticket ${ticketKey} desde Jira...`);
     const ticketRes = await axios.get(`https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}`, { headers: JIRA_HEADERS });
     const fields = ticketRes.data?.fields || {};
@@ -193,7 +193,7 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     const mercado = (fields.customfield_10257?.value || 'GLOBAL').trim();
     const permiso = (fields.customfield_10612?.value || 'Preview').trim();
 
-    // 2. Transicionamos el estado del ticket en Jira
+    // Transicionamos el estado del ticket en Jira
     console.log(`🔧 [JIRA API] Buscando transiciones para mover ${ticketKey}...`);
     const transUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
     const resTrans = await axios.get(transUrl, { headers: JIRA_HEADERS });
@@ -207,16 +207,17 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     console.log(`🚀 [JIRA API] Ejecutando transición (ID: ${foundTransition.id}) hacia 'Request Approved'...`);
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
-    // 3. Respuesta e inyección final del perfil completo en la tarjeta editada de Slack
+    // RESPUESTA RECONSTRUIDA: Mantiene el formato original arriba y añade el éxito con el desglose abajo
     await respond({
-      text: `✅ *Approved: <${ticketUrl}|${ticketKey}> has been processed.*\nAction executed in Jira by <@${userId}>. Status moved to *Request Approved*.\n\n*User Profile managed:*\n- Mail: ${userEmail}\n- Name: ${userFirstName.trim()} ${userLastName.trim()}\n- Market: ${mercado}\n- Permission: ${permiso}`,
+      text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmail}\n\n✅ *Approved and processed successfully.*\nAction executed by <@${userId}>. Status moved to *Request Approved*.\n\n*User Profile managed:*\n- Name: ${userFirstName.trim()} ${userLastName.trim()}\n- Market: ${mercado}\n- Permission: ${permiso}`,
       replace_original: true
     });
 
   } catch (jiraError) {
     console.error('💥 [ERROR SLACK ACTION]:', jiraError.message);
+    // Si falla, conserva la cabecera original pero avisa del error técnico abajo
     await respond({
-      text: `⚠️ *Slack action registered, but Jira update encountered an issue:* ${jiraError.message}`,
+      text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n⚠️ *Slack action registered, but Jira update encountered an issue:* ${jiraError.message}`,
       replace_original: true
     });
   }
