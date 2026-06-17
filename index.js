@@ -45,7 +45,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
     const idPadre = fields.customfield_10623?.id || fields.customfield_10623;
     const idHijo = fields.customfield_10620?.id || fields.customfield_10620;
 
-    // FILTRO ANTIBUCLE: Solo actúa si el estado real es 'Request Approved' y es One.CMS
     if (currentStatus === 'Request Approved' && idPadre === '12362' && idHijo === '12350') {
       
       const userEmail = fields.customfield_10088;
@@ -73,10 +72,8 @@ expressApp.post('/jira-webhook', async (req, res) => {
         return `SEAT_CUPRA_${paisNombre}_${brand}_Website_${permisoTexto}_IMS`;
       });
 
-      // Llamada real a la API de Adobe
       const adobeSuccess = await crearUsuarioEnAdobe(userEmail, gruposAdobeFinales);
 
-      // Comentario final en inglés en el ticket de Jira
       const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
       let comentarioJira = adobeSuccess 
         ? `🤖 *[Bot]* User provisioning successfully managed in Adobe IMS.\n\n* *User:* ${userEmail}\n* *Assigned Groups:* ${listaGruposTexto}`
@@ -94,7 +91,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK: REGISTRA LA ACCIÓN LIMPIAMENTE
+// 2. INTERACTIVIDAD SLACK: CAMBIA EL ESTADO EN JIRA DIRECTAMENTE
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   await ack(); 
@@ -106,12 +103,39 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // Notificamos en Slack que la acción se ha registrado de forma local.
-  // El mensaje original de Slack se mantendrá intacto gracias a 'replace_original: false'
   await respond({
-    text: `✅ *Action registered for <${ticketUrl}|${ticketKey}> by <@${userId}>.*\nProceeding with Adobe IMS matrix provisioning...`,
+    text: `🔄 *Processing approval for <${ticketUrl}|${ticketKey}>...*`,
     replace_original: false
   });
+
+  try {
+    // 1. Preguntamos a la API de Jira qué transiciones tiene disponibles este ticket
+    const transUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
+    const resTrans = await axios.get(transUrl, { headers: JIRA_HEADERS });
+    
+    // 2. Buscamos la que se llame "Request Approved" (insensible a mayúsculas)
+    const foundTransition = resTrans.data.transitions.find(t => t.name.toLowerCase() === 'request approved');
+
+    if (!foundTransition) {
+      throw new Error("Transition 'Request Approved' not found or not available from current status.");
+    }
+
+    // 3. Le decimos a Jira por API que ejecute esa transición de estado
+    await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
+
+    // 4. Confirmamos en Slack que todo ha ido de lujo
+    await respond({
+      text: `✅ *Action registered for <${ticketUrl}|${ticketKey}> by <@${userId}>.*\nTicket status successfully moved to *Request Approved* in Jira.`,
+      replace_original: false
+    });
+
+  } catch (jiraError) {
+    console.error('[SLACK TO JIRA TRANSITION ERROR]:', jiraError.message);
+    await respond({
+      text: `⚠️ *Approved in Slack, but Jira couldn't update automatically:* ${jiraError.message}\nPlease move ticket *${ticketKey}* to *Request Approved* manually.`,
+      replace_original: false
+    });
+  }
 });
 
 // ==========================================
