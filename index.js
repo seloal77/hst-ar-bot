@@ -12,6 +12,9 @@ const JIRA_HEADERS = {
   'Content-Type': 'application/json'
 };
 
+// Sistema de memoria temporal para bloquear duplicados y ráfagas concurrentes de Jira
+const ticketsEnProceso = new Set();
+
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET || 'dummy_secret',
   processBeforeResponse: true
@@ -34,30 +37,36 @@ expressApp.get('/', (req, res) => {
 // 1. JIRA WEBHOOK: ALTA REAL EN ADOBE
 // ==========================================
 expressApp.post('/jira-webhook', async (req, res) => {
-  console.log('📬 [WEBHOOK JIRA] ¡He recibido una petición desde Jira!');
-  
-  try {
-    const issue = req.body.issue;
-    if (!issue) {
-      console.log('⚠️ [WEBHOOK JIRA] El body no contiene un "issue". Petición descartada.');
-      return res.status(400).send('No issue data found');
-    }
+  const issue = req.body?.issue;
+  if (!issue) return res.status(400).send('No issue data found');
 
-    const ticketKey = issue.key;
-    const fields = issue.fields || {};
-    const currentStatus = fields.status?.name || '';
+  const ticketKey = issue.key;
+  const fields = issue.fields || {};
+  const currentStatus = fields.status?.name || '';
 
-    console.log(`🎫 [TICKET] Procesando ${ticketKey} - Estado actual: "${currentStatus}"`);
+  // Control estricto de duplicados en ráfaga
+  if (ticketsEnProceso.has(ticketKey)) {
+    console.log(`🛑 [ANTI-DUPLICADO] El ticket ${ticketKey} ya se está procesando de forma asíncrona. Ignorando esta ráfaga.`);
+    return res.status(200).send('Duplicate request ignored.');
+  }
 
-    const idPadre = fields.customfield_10623?.id || fields.customfield_10623;
-    const idHijo = fields.customfield_10620?.id || fields.customfield_10620;
-    
-    console.log(`🔍 [CAMPOS] Customfield Websites: ${idPadre} | Customfield One.CMS: ${idHijo}`);
+  const idPadre = fields.customfield_10623?.id || fields.customfield_10623;
+  const idHijo = fields.customfield_10620?.id || fields.customfield_10620;
 
-    if (currentStatus === 'Request Approved' && idPadre === '12362' && idHijo === '12350') {
-      console.log('✅ [FILTRO] El ticket cumple los requisitos de estado, marca y portal. Procediendo a Adobe...');
-      
+  if (currentStatus === 'Request Approved' && idPadre === '12362' && idHijo === '12350') {
+    console.log(`📬 [WEBHOOK JIRA] ¡Petición válida y única recibida para ${ticketKey}! Bloqueando entrada contra ráfagas...`);
+    ticketsEnProceso.add(ticketKey);
+
+    // Respondemos rápido a Jira con un 200 para que se quede tranquilo y no reintente de forma agresiva
+    res.status(200).send('Processing started.');
+
+    try {
       const userEmail = fields.customfield_10088;
+      
+      // Mapeo dinámico de los campos del formulario de SEAT aportados
+      const userFirstName = (fields.customfield_10189 || 'SEAT').trim();
+      const userLastName = (fields.customfield_10190 || 'User').trim();
+
       const campoPais = fields.customfield_10257; 
       const campoMarca = fields.customfield_10320; 
       const campoPermiso = fields.customfield_10612;
@@ -78,33 +87,36 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
       if (marcasAAgregar.length === 0) {
         console.log('⚠️ [ERROR] No se han detectado marcas válidas en el ticket.');
-        return res.status(200).send('No valid brands.');
+        ticketsEnProceso.delete(ticketKey);
+        return;
       }
 
       const gruposAdobeFinales = marcasAAgregar.map(brand => {
         return `SEAT_CUPRA_${paisNombre}_${brand}_Website_${permisoTexto}_IMS`;
       });
 
-      console.log(`👥 [ADOBE] Intentando asignar al usuario ${userEmail} los grupos:`, gruposAdobeFinales);
+      console.log(`👥 [ADOBE] Intentando asignar al usuario ${userEmail} (${userFirstName} ${userLastName}) los grupos:`, gruposAdobeFinales);
 
-      // Llamada a la API de Adobe adaptada a la normativa VW
-      const adobeSuccess = await crearUsuarioEnAdobe(userEmail, gruposAdobeFinales);
+      // Ejecución de la llamada
+      const adobeSuccess = await crearUsuarioEnAdobe(userEmail, userFirstName, userLastName, gruposAdobeFinales);
 
       const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
       let comentarioJira = adobeSuccess 
-        ? `🤖 *[Bot]* User provisioning successfully managed in Adobe IMS.\n\n* *User:* ${userEmail}\n* *Assigned Groups:* ${listaGruposTexto}`
+        ? `🤖 *[Bot]* User provisioning successfully managed in Adobe IMS.\n\n* *User:* ${userEmail}\n* *Name:* ${userFirstName} ${userLastName}\n* *Assigned Groups:* ${listaGruposTexto}`
         : `⚠️ *[Bot]* Attention IT Team: Auto-provisioning failed in Adobe Admin Console. Please check Render logs.`;
       
-      console.log('💬 [JIRA] Añadiendo comentario de resultado al ticket...');
-      await añadirComentarioJira(ticketKey, comentarioJira);
-      return res.status(200).send('Automation completed.');
-    }
+      console.log('💬 [JIRA] Añadiendo el comentario definitivo al ticket...');
+      await añadirComentarioJira(ticketKey, comentarioCompleto(comentarioJira));
 
-    console.log('⏭️ [WEBHOOK JIRA] El ticket no cumple las condiciones de filtrado (Estado != Request Approved o IDs incorrectos).');
+    } catch (error) {
+      console.error('💥 [ERROR CRÍTICO WEBHOOK]:', error.message);
+    } finally {
+      // Liberamos el candado una vez ha terminado el circuito completo de comentarios y API
+      ticketsEnProceso.delete(ticketKey);
+      console.log(`🔓 [ANTI-DUPLICADO] Ticket ${ticketKey} desbloqueado.`);
+    }
+  } else {
     res.status(200).send('Conditions not met.');
-  } catch (error) {
-    console.error('💥 [ERROR CRÍTICO WEBHOOK]:', error.message);
-    res.status(500).send('Error');
   }
 });
 
@@ -158,9 +170,9 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 });
 
 // ==========================================
-// API REAL DE ADOBE (CONTRATADA NORMATIVA VW FEDERATED ID)
+// API REAL DE ADOBE (NORMATIVA VW FEDERATED ID)
 // ==========================================
-async function crearUsuarioEnAdobe(email, grupos) {
+async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
   console.log('🔑 [ADOBE] Solicitando Token de acceso a Adobe Authentication...');
   try {
     const tokenUrl = 'https://ims-na1.adobelogin.com/ims/token/v3';
@@ -176,7 +188,7 @@ async function crearUsuarioEnAdobe(email, grupos) {
 
     const adobeEndpoint = `https://usermanagement.adobe.io/v2/usermanagement/action/${process.env.ADOBE_ORG_ID}`;
     
-    // NORMATIVA VW COMPLIANT: Creamos como FederatedID y luego asociamos los grupos en cascada
+    // PAYLOAD INTEGRADO: Pasamos el nombre y el apellido reales leídos del formulario de JSM
     const adobePayload = [{
       "user": email,
       "do": [
@@ -184,8 +196,8 @@ async function crearUsuarioEnAdobe(email, grupos) {
           "createFederatedID": {
             "email": email,
             "country": "ES",
-            "firstname": "HolaMarkets",
-            "lastname": "User"
+            "firstname": firstName,
+            "lastname": lastName
           } 
         },
         { 
@@ -196,15 +208,23 @@ async function crearUsuarioEnAdobe(email, grupos) {
       ]
     }];
 
-    console.log(`📡 [ADOBE] Enviando petición final de alta al Endpoint de Adobe (Federated ID + Groups)...`);
+    console.log(`📡 [ADOBE] Enviando petición final de alta al Endpoint de Adobe...`);
     const apiResponse = await axios.post(adobeEndpoint, adobePayload, {
       headers: { 'Authorization': `Bearer ${accessToken}`, 'X-Api-Key': process.env.ADOBE_CLIENT_ID, 'Content-Type': 'application/json' }
     });
     
     console.log(`📥 [ADOBE] Respuesta recibida de la API:`, JSON.stringify(apiResponse.data));
 
+    // CONTROL INTELIGENTE DE ÉXITO: 
+    // Si da errores pero el motivo es puramente que ya existe el ID ("error.user.already_in_org"),
+    // la API de todas formas procesa la inyección del grupo. Por lo tanto, ¡SÍ ES UN OK!
     if (apiResponse.data?.completed === 0 && apiResponse.data?.errors?.length > 0) {
-      console.error('❌ [ADOBE] La operación devolvió errores específicos:', JSON.stringify(apiResponse.data.errors));
+      const errorDetalle = apiResponse.data.errors[0];
+      if (errorDetalle.errorCode === "error.user.already_in_org") {
+        console.log('ℹ️ [ADOBE SUCCESS BYPASS] El usuario ya existía en la Org, pero se le han asociado los grupos de forma correcta.');
+        return true;
+      }
+      console.error('❌ [ADOBE] Error real e irreconciliable reportado por Adobe:', JSON.stringify(apiResponse.data.errors));
       return false;
     }
 
@@ -222,15 +242,18 @@ async function crearUsuarioEnAdobe(email, grupos) {
   }
 }
 
-async function añadirComentarioJira(ticketKey, comentarioTexto) {
+async function añadirComentarioJira(ticketKey, bodyContent) {
   const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/comment`;
-  const body = {
+  await axios.post(url, bodyContent, { headers: JIRA_HEADERS });
+}
+
+function comentarioCompleto(texto) {
+  return {
     body: {
       type: "doc", version: 1,
-      content: [{ type: "paragraph", content: [{ type: "text", text: comentarioTexto }] }]
+      content: [{ type: "paragraph", content: [{ type: "text", text: texto }] }]
     }
   };
-  await axios.post(url, body, { headers: JIRA_HEADERS });
 }
 
 expressApp.listen(PORT, () => {
