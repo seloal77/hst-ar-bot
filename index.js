@@ -45,12 +45,12 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const currentStatus = fields.status?.name || '';
 
   if (ticketsProcesadosConExito.has(ticketKey)) {
-    console.log(`🛑 [ANTI-DUPLICADO ETERNO] El ticket ${ticketKey} ya fue procesado. Ignorando.`);
+    console.log(`🛑 [ANTI-DUPLICADO ETERNO] Ticket ${ticketKey} already processed. Ignoring.`);
     return res.status(200).send('Already processed.');
   }
 
   if (ticketsEnProcesoTemporal.has(ticketKey)) {
-    console.log(`🛑 [ANTI-DUPLICADO TEMPORAL] Ráfaga detectada para ${ticketKey}. Ignorando.`);
+    console.log(`🛑 [ANTI-DUPLICADO TEMPORAL] Burst detected for ${ticketKey}. Ignoring.`);
     return res.status(200).send('Duplicate request.');
   }
 
@@ -58,14 +58,13 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const idAccion = campoAccion?.id || campoAccion;
 
   if (idAccion === '14665') {
-    console.log(`ℹ️ [JIRA WEBHOOK] Ticket ${ticketKey} es de tipo 'Delete current account'. Ignorando.`);
+    console.log(`ℹ️ [JIRA WEBHOOK] Ticket ${ticketKey} is 'Delete current account'. Ignoring.`);
     return res.status(200).send('Manual deletion request.');
   }
 
   const idPadre = String(fields.customfield_10623?.id || fields.customfield_10623 || '');
   const idHijo = String(fields.customfield_10620?.id || fields.customfield_10620 || '');
 
-  // El bot ahora acepta de manera flexible cualquier ID de hijo dentro del array para que no falle si cambia
   const hijosValidosAdobe = ['12350']; 
   const hijosValidosJira = ['12350']; 
 
@@ -76,7 +75,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
     
     // RUTA A: ADOBE (CMS)
     if (esAltaAdobeValida) {
-      console.log(`📬 [WEBHOOK JIRA] Procesando alta de ADOBE para ${ticketKey}...`);
+      console.log(`📬 [WEBHOOK JIRA] Processing Adobe provisioning for ${ticketKey}...`);
       ticketsProcesadosConExito.add(ticketKey);
       ticketsEnProcesoTemporal.add(ticketKey);
       res.status(200).send('Processing Adobe started.');
@@ -101,7 +100,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
         if (idMarca === '11248') marcasAAgregar.push('CUPRA');
         if (idMarca === '11249') marcasAAgregar.push('SEAT', 'CUPRA');
 
-        if (marcasAAgregar.length === 0) return console.log('⚠️ No se han detectado marcas.');
+        if (marcasAAgregar.length === 0) return console.log('⚠️ No brands detected.');
 
         const gruposAdobeFinales = marcasAAgregar.map(brand => `SEAT_CUPRA_${paisNombre}_${brand}_Website_${permisoTexto}_IMS`);
         const resultadoAdobe = await crearUsuarioEnAdobe(userEmail, userFirstName.trim(), userLastName.trim(), gruposAdobeFinales);
@@ -111,21 +110,30 @@ expressApp.post('/jira-webhook', async (req, res) => {
           const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
           comentarioJira = `🤖 *[HST Access SyncBot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
         } else {
+          // CORRECCIÓN PUNTO 2: Comentario limpio, sin código feo de Adobe y 100% en inglés
           const errorMsg = resultadoAdobe.errorReason || '';
-          let diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* Error general en Adobe. Detalles: \`${errorMsg}\`.`;
+          let diagnosticoSoporte = '';
+
           if (errorMsg.includes("createFederatedID")) {
-            diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* El dominio de este correo tiene el Sync activo. Ve a *Adobe Admin Console* y activa *'Enable editing for 1 hour'* antes de reintentar.`;
+            diagnosticoSoporte = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n📌 *IT Diagnostic:* This user's email domain has corporate directory synchronization enabled. To complete this request, an administrator must log into the *Adobe Admin Console*, locate the directory for this domain, and manually check the option *'Enable editing for 1 hour'* before re-triggering this transition.`;
+          } else if (errorMsg.includes("401") || errorMsg.includes("unauthorized") || errorMsg.includes("JWT")) {
+            diagnosticoSoporte = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n📌 *IT Diagnostic:* Bot authentication error. The Adobe API credentials assigned in Render environment variables have expired or are incorrect. Please verify the Client Secret.`;
+          } else if (errorMsg.includes("country")) {
+            diagnosticoSoporte = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n📌 *IT Diagnostic:* The country code provided is not supported by SEAT's Adobe Console. Please check the Market field in the Jira form.`;
+          } else {
+            diagnosticoSoporte = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n📌 *IT Diagnostic:* General error returned by Adobe endpoint: \`${errorMsg}\`.`;
           }
-          comentarioJira = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n- Reason: ${errorMsg}${diagnosticoSoporte}`;
+
+          comentarioJira = diagnosticoSoporte;
         }
         await añadirComentarioJira(ticketKey, comentarioCompleto(comentarioJira));
-      } catch (err) { console.error('💥 Error ruta Adobe:', err.message); }
+      } catch (err) { console.error('💥 Adobe route error:', err.message); }
       finally { setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000); }
     }
 
     // RUTA B: JIRA (HOLA SUPPORT)
     else if (esAltaJiraValida) {
-      console.log(`📬 [WEBHOOK JIRA] Procesando alta de JIRA para ${ticketKey}...`);
+      console.log(`📬 [WEBHOOK JIRA] Processing Jira provisioning for ${ticketKey}...`);
       ticketsProcesadosConExito.add(ticketKey);
       ticketsEnProcesoTemporal.add(ticketKey);
       res.status(200).send('Processing Jira started.');
@@ -135,7 +143,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
         const userEmail = fields.customfield_10088 || issue.fields?.reporter?.emailAddress || 'unknown';
 
         if (!accountIdUser) {
-          await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error: No se pudo localizar el accountId del usuario en Jira para asignar los grupos.`));
+          await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error: Could not locate Jira accountId for group assignment.`));
           return;
         }
 
@@ -154,7 +162,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
           comentarioJira = `⚠️ *[HST Access SyncBot]* Provisioning partial failure in Jira Groups.\n\n- Failed Groups: ${erroresGrupos.join(', ')}`;
         }
         await añadirComentarioJira(ticketKey, comentarioCompleto(comentarioJira));
-      } catch (err) { console.error('💥 Error ruta Jira:', err.message); }
+      } catch (err) { console.error('💥 Jira route error:', err.message); }
       finally { setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000); }
     }
   } else {
@@ -190,7 +198,7 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   });
 
   try {
-    console.log(`🔍 [SLACK ACTION] Consultando detalles de ${ticketKey}...`);
+    console.log(`🔍 [SLACK ACTION] Fetching issue details for ${ticketKey}...`);
     const ticketRes = await axios.get(`https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}`, { headers: JIRA_HEADERS });
     const fields = ticketRes.data?.fields || {};
 
@@ -213,6 +221,7 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     if (permisoOriginal.toLowerCase() === 'editor') permisoSlack = 'Edition (+preview)';
     if (idPadre === '12361') permisoSlack = 'Customer standard access';
 
+    // Transicionamos el ticket en Jira
     const transUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
     const resTrans = await axios.get(transUrl, { headers: JIRA_HEADERS });
     const foundTransition = resTrans.data.transitions.find(t => t.name.toLowerCase() === 'request approved');
@@ -220,8 +229,9 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     if (!foundTransition) throw new Error("Transition 'Request Approved' not found.");
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
+    // CORRECCIÓN PUNTO 1: Mensaje honesto en Slack. Informamos de que el ticket cambió a 'Approved' y se está ejecutando la acción.
     await respond({
-      text: `*${cabeceraPlataforma}*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n*User Profile managed:*\n• *Mail:* ${userEmailDetectado}\n• *Name:* ${userFirstName.trim()} ${userLastName.trim()}\n• *Market:* ${mercado}\n• *Permission:* ${permisoSlack}\n\n Approved and processed successfully.\nAction executed by <@${userId}>. Status moved to *Request Approved*.`,
+      text: `*${cabeceraPlataforma}*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n*User Profile managed:*\n• *Mail:* ${userEmailDetectado}\n• *Name:* ${userFirstName.trim()} ${userLastName.trim()}\n• *Market:* ${mercado}\n• *Permission:* ${permisoSlack}\n\n✅ *Ticket approved by <@${userId}>.*\nStatus updated to *Request Approved*. Automated provisioning is now running in the background. Please check the Jira ticket comments for final results.`,
       replace_original: true
     });
 
