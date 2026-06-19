@@ -12,7 +12,6 @@ const JIRA_HEADERS = {
   'Content-Type': 'application/json'
 };
 
-// Registro de memoria permanente y temporal contra duplicados de Jira
 const ticketsProcesadosConExito = new Set();
 const ticketsEnProcesoTemporal = new Set();
 
@@ -31,7 +30,7 @@ const expressApp = receiver.app;
 expressApp.use(express.json());
 
 expressApp.get('/', (req, res) => {
-  res.status(200).send('🚀 SEAT IT Orchestrator is online.');
+  res.status(200).send('🚀 Adobe SyncBot is online.');
 });
 
 // ==========================================
@@ -46,28 +45,28 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const currentStatus = fields.status?.name || '';
 
   if (ticketsProcesadosConExito.has(ticketKey)) {
-    console.log(`🛑 [ANTI-DUPLICADO ETERNO] El ticket ${ticketKey} ya fue procesado con éxito o dio error. Ignorando.`);
-    return res.status(200).send('Already processed in the past.');
+    console.log(`🛑 [ANTI-DUPLICADO ETERNO] El ticket ${ticketKey} ya fue procesado. Ignorando.`);
+    return res.status(200).send('Already processed.');
   }
 
   if (ticketsEnProcesoTemporal.has(ticketKey)) {
     console.log(`🛑 [ANTI-DUPLICADO TEMPORAL] Ráfaga detectada para ${ticketKey}. Ignorando.`);
-    return res.status(200).send('Duplicate request ignored.');
+    return res.status(200).send('Duplicate request.');
   }
 
   const campoAccion = fields.customfield_11728;
   const idAccion = campoAccion?.id || campoAccion;
 
   if (idAccion === '14665') {
-    console.log(`ℹ️ [JIRA WEBHOOK] Ticket ${ticketKey} es de tipo 'Delete current account'. No se realiza acción automática.`);
-    return res.status(200).send('Manual deletion request. No action taken.');
+    console.log(`ℹ️ [JIRA WEBHOOK] Ticket ${ticketKey} es de tipo 'Delete current account'. Ignorando.`);
+    return res.status(200).send('Manual deletion request.');
   }
 
   const idPadre = fields.customfield_10623?.id || fields.customfield_10623;
   const idHijo = fields.customfield_10620?.id || fields.customfield_10620;
 
   if (currentStatus === 'Request Approved' && idPadre === '12362' && idHijo === '12350' && idAccion === '14664') {
-    console.log(`📬 [WEBHOOK JIRA] ¡Petición de Alta válida recibida para ${ticketKey}! Activando bloqueos...`);
+    console.log(`📬 [WEBHOOK JIRA] Procesando alta para ${ticketKey}...`);
     
     ticketsProcesadosConExito.add(ticketKey);
     ticketsEnProcesoTemporal.add(ticketKey);
@@ -81,23 +80,14 @@ expressApp.post('/jira-webhook', async (req, res) => {
       let userLastName = '';
 
       if (fields.customfield_10189) {
-        userFirstName = typeof fields.customfield_10189 === 'object' 
-          ? (fields.customfield_10189.value || fields.customfield_10189.name || '') 
-          : fields.customfield_10189;
+        userFirstName = typeof fields.customfield_10189 === 'object' ? (fields.customfield_10189.value || fields.customfield_10189.name || '') : fields.customfield_10189;
       }
-      
       if (fields.customfield_10190) {
-        userLastName = typeof fields.customfield_10190 === 'object' 
-          ? (fields.customfield_10190.value || fields.customfield_10190.name || '') 
-          : fields.customfield_10190;
+        userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || '') : fields.customfield_10190;
       }
 
-      if (!userFirstName.trim() || userFirstName.includes('@')) {
-        userFirstName = userEmail.split('@')[0];
-      }
-      if (!userLastName.trim() || userLastName.includes('@')) {
-        userLastName = 'SEAT Corporate';
-      }
+      if (!userFirstName.trim() || userFirstName.includes('@')) userFirstName = userEmail.split('@')[0];
+      if (!userLastName.trim() || userLastName.includes('@')) userLastName = 'SEAT Corporate';
 
       userFirstName = userFirstName.trim();
       userLastName = userLastName.trim();
@@ -111,9 +101,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
       const idPermiso = campoPermiso?.id || campoPermiso;
 
       let permisoTexto = 'Preview';
-      if (idPermiso === '12322') {
-        permisoTexto = 'Editor';
-      }
+      if (idPermiso === '12322') permisoTexto = 'Editor';
 
       let marcasAAgregar = [];
       if (idMarca === '11247') marcasAAgregar.push('SEAT');
@@ -121,28 +109,34 @@ expressApp.post('/jira-webhook', async (req, res) => {
       if (idMarca === '11249') marcasAAgregar.push('SEAT', 'CUPRA');
 
       if (marcasAAgregar.length === 0) {
-        console.log('⚠️ [ERROR] No se han detectado marcas válidas en el ticket.');
+        console.log('⚠️ [ERROR] No se han detectado marcas válidas.');
         return;
       }
 
-      const gruposAdobeFinales = marcasAAgregar.map(brand => {
-        return `SEAT_CUPRA_${paisNombre}_${brand}_Website_${permisoTexto}_IMS`;
-      });
+      const gruposAdobeFinales = marcasAAgregar.map(brand => `SEAT_CUPRA_${paisNombre}_${brand}_Website_${permisoTexto}_IMS`);
 
-      console.log(`👥 [ADOBE] Intentando asignar al usuario ${userEmail} los grupos:`, gruposAdobeFinales);
-
+      console.log(`👥 [ADOBE] Solicitando asignación para ${userEmail}...`);
       const resultadoAdobe = await crearUsuarioEnAdobe(userEmail, userFirstName, userLastName, gruposAdobeFinales);
 
       let comentarioJira = '';
       if (resultadoAdobe.success) {
         const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
-        comentarioJira = `🤖 *[Bot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
+        comentarioJira = `🤖 *[Adobe SyncBot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
       } else {
-        let notaSincronizacion = "";
-        if (resultadoAdobe.errorReason && resultadoAdobe.errorReason.includes("createFederatedID")) {
-          notaSincronizacion = "\n\n*Note:* Please double-check that the directory synchronization or 1-hour editing window is enabled in Adobe Admin Console for this domain.";
+        const errorMsg = resultadoAdobe.errorReason || '';
+        let diagnosticoSoporte = '';
+
+        if (errorMsg.includes("createFederatedID")) {
+          diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* El dominio de este correo electrónico corporativo tiene la sincronización automática de directorios encendida. Para tramitar este ticket, un administrador debe acceder a la *Adobe Admin Console*, buscar el directorio de este país y activar manualmente la casilla *'Enable editing for 1 hour'* (Permitir edición durante 1 hora) antes de reintentar el alta.`;
+        } else if (errorMsg.includes("401") || errorMsg.includes("unauthorized") || errorMsg.includes("JWT")) {
+          diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* Error de autenticación del Bot. Las credenciales de la API de Adobe asignadas en las variables de entorno de Render han caducado o son incorrectas. Por favor, revisa el Client Secret corporativo.`;
+        } else if (errorMsg.includes("country")) {
+          diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* El código de país asignado en la petición no está admitido por la consola de Adobe de SEAT. Revisa el campo de Mercado del formulario de Jira.`;
+        } else {
+          diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* Error general en la consola de Adobe Admin Console. Detalles técnicos devuelvos por el endpoint: \`${errorMsg}\`.`;
         }
-        comentarioJira = `⚠️ *[Bot]* Auto-provisioning failed in Adobe Admin Console.\n\n- Reason: ${resultadoAdobe.errorReason}${notaSincronizacion}`;
+
+        comentarioJira = `⚠️ *[Adobe SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n- Reason: ${errorMsg}${diagnosticoSoporte}`;
       }
       
       console.log('💬 [JIRA] Añadiendo el comentario definitivo interno al ticket...');
@@ -151,18 +145,15 @@ expressApp.post('/jira-webhook', async (req, res) => {
     } catch (error) {
       console.error('💥 [ERROR CRÍTICO WEBHOOK]:', error.message);
     } finally {
-      setTimeout(() => {
-        ticketsEnProcesoTemporal.delete(ticketKey);
-        console.log(`🔓 [ANTI-DUPLICADO] El candado de ráfaga para ${ticketKey} ha expirado.`);
-      }, 10000);
+      setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000);
     }
   } else {
-    res.status(200).send('Conditions not met or Action Type excluded.');
+    res.status(200).send('Conditions not met.');
   }
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK (NUEVO FORMATO DE RESPUESTA RECONSTRUIDO)
+// 2. INTERACTIVIDAD SLACK
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   const userId = body.user.id;
@@ -183,7 +174,6 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // Animación de carga intermedia manteniendo el formato limpio de puntos
   await ack({
     text: `*New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n*User Profile requested:*\n• *Mail:* ${userEmailDetectado}\n\n🔄 _Processing approval (Requested by <@${userId}>)..._`,
     replace_original: true
@@ -211,21 +201,16 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     const permisoOriginal = (fields.customfield_10612?.value || fields.customfield_10612 || 'Preview').trim();
 
     let permisoSlack = 'Preview';
-    if (permisoOriginal.toLowerCase() === 'editor') {
-      permisoSlack = 'Edition (+preview)';
-    }
+    if (permisoOriginal.toLowerCase() === 'editor') permisoSlack = 'Edition (+preview)';
 
     const transUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
     const resTrans = await axios.get(transUrl, { headers: JIRA_HEADERS });
     
     const foundTransition = resTrans.data.transitions.find(t => t.name.toLowerCase() === 'request approved');
-    if (!foundTransition) {
-      throw new Error("Transition 'Request Approved' not found.");
-    }
+    if (!foundTransition) throw new Error("Transition 'Request Approved' not found.");
 
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
-    // CAMBIO EFECTUADO AQUÍ: Reconstrucción idéntica al Automation inicial (puntos e información ordenada arriba)
     await respond({
       text: `*New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n*User Profile managed:*\n• *Mail:* ${userEmailDetectado}\n• *Name:* ${userFirstName.trim()} ${userLastName.trim()}\n• *Market:* ${mercado}\n• *Permission:* ${permisoSlack}\n\n Approved and processed successfully.\nAction executed by <@${userId}>. Status moved to *Request Approved*.`,
       replace_original: true
@@ -285,7 +270,7 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
       if (errorDetalle.errorCode === "error.user.already_in_org") {
         return { success: true };
       }
-      return { success: false, errorReason: errorDetalle.message };
+      return { success: false, errorReason: errorDetalle.message || errorDetalle.errorCode };
     }
 
     return { success: true };
@@ -297,7 +282,7 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
 }
 
 async function añadirComentarioJira(ticketKey, bodyContent) {
-  const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/comment`;
+  const url = `https://` + process.env.JIRA_DOMAIN + `/rest/api/3/issue/${ticketKey}/comment`;
   
   const payloadInterno = {
     ...bodyContent,
@@ -324,5 +309,5 @@ function comentarioCompleto(texto) {
 }
 
 expressApp.listen(PORT, () => {
-  console.log(`🚀 IT Orchestrator running stably on port ${PORT}`);
+  console.log(`🚀 Adobe SyncBot running stably on port ${PORT}`);
 });
