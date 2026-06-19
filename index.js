@@ -65,11 +65,11 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const idPadre = String(fields.customfield_10623?.id || fields.customfield_10623 || '');
   const idHijo = String(fields.customfield_10620?.id || fields.customfield_10620 || '');
 
+  // VALIDACIÓN FLEXIBLE: Adobe comprueba hijo, Jira pasa directo sin él al venir vacío
   const hijosValidosAdobe = ['12350']; 
-  const hijosValidosJira = ['12350']; 
 
   const esAltaAdobeValida = (idPadre === '12362' && hijosValidosAdobe.includes(idHijo));
-  const esAltaJiraValida = (idPadre === '12361' && hijosValidosJira.includes(idHijo));
+  const esAltaJiraValida = (idPadre === '12361'); 
 
   if (currentStatus === 'Request Approved' && idAccion === '14664' && (esAltaAdobeValida || esAltaJiraValida)) {
     
@@ -110,7 +110,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
           const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
           comentarioJira = `🤖 *[HST Access SyncBot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
         } else {
-          // CORRECCIÓN PUNTO 2: Comentario limpio, sin código feo de Adobe y 100% en inglés
           const errorMsg = resultadoAdobe.errorReason || '';
           let diagnosticoSoporte = '';
 
@@ -151,7 +150,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
         let erroresGrupos = [];
 
         for (const grupo of gruposJira) {
-          const resGrupo = await añadirUsuarioAGrupoJira(accountIdUser, grupo);
+          const resGrupo = await añadirUsuarioAGrupoJira(accountIdUser, grupo); // <-- Corregido variable de ámbito
           if (!resGrupo.success) erroresGrupos.push(`${grupo} (${resGrupo.errorReason})`);
         }
 
@@ -221,7 +220,6 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     if (permisoOriginal.toLowerCase() === 'editor') permisoSlack = 'Edition (+preview)';
     if (idPadre === '12361') permisoSlack = 'Customer standard access';
 
-    // Transicionamos el ticket en Jira
     const transUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
     const resTrans = await axios.get(transUrl, { headers: JIRA_HEADERS });
     const foundTransition = resTrans.data.transitions.find(t => t.name.toLowerCase() === 'request approved');
@@ -229,7 +227,6 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     if (!foundTransition) throw new Error("Transition 'Request Approved' not found.");
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
-    // CORRECCIÓN PUNTO 1: Mensaje honesto en Slack. Informamos de que el ticket cambió a 'Approved' y se está ejecutando la acción.
     await respond({
       text: `*${cabeceraPlataforma}*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n*User Profile managed:*\n• *Mail:* ${userEmailDetectado}\n• *Name:* ${userFirstName.trim()} ${userLastName.trim()}\n• *Market:* ${mercado}\n• *Permission:* ${permisoSlack}\n\n✅ *Ticket approved by <@${userId}>.*\nStatus updated to *Request Approved*. Automated provisioning is now running in the background. Please check the Jira ticket comments for final results.`,
       replace_original: true
