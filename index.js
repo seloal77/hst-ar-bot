@@ -146,11 +146,12 @@ expressApp.post('/jira-webhook', async (req, res) => {
           return;
         }
 
-        const gruposJira = ['f72d3948-1297-4126-be44-0cf5d895d13f', '23b4e346-471b-4144-a24b-49740dc23657'];
+        // Nombres corregidos en texto plano
+        const gruposJira = ['Guest-Confluence_HST', 'Triger_Comment'];
         let erroresGrupos = [];
 
         for (const grupo of gruposJira) {
-          const resGrupo = await añadirUsuarioAGrupoJira(accountIdUser, grupo); // <-- Corregido variable de ámbito
+          const resGrupo = await añadirUsuarioAGrupoJira(accountIdUser, grupo);
           if (!resGrupo.success) erroresGrupos.push(`${grupo} (${resGrupo.errorReason})`);
         }
 
