@@ -65,7 +65,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const idPadre = String(fields.customfield_10623?.id || fields.customfield_10623 || '');
   const idHijo = String(fields.customfield_10620?.id || fields.customfield_10620 || '');
 
-  // VALIDACIÓN FLEXIBLE: Adobe comprueba hijo, Jira pasa directo sin él al venir vacío
   const hijosValidosAdobe = ['12350']; 
 
   const esAltaAdobeValida = (idPadre === '12362' && hijosValidosAdobe.includes(idHijo));
@@ -73,6 +72,22 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
   if (currentStatus === 'Request Approved' && idAccion === '14664' && (esAltaAdobeValida || esAltaJiraValida)) {
     
+    // EXTRACCIÓN UNIFICADA DEL FORMULARIO (IGUAL PARA AEM Y JIRA)
+    const userEmail = fields.customfield_10088 || '';
+    let userFirstName = typeof fields.customfield_10189 === 'object' ? (fields.customfield_10189.value || fields.customfield_10189.name || '') : fields.customfield_10189 || '';
+    let userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || '') : fields.customfield_10190 || '';
+
+    if (!userFirstName.trim() || userFirstName.includes('@')) userFirstName = userEmail.split('@')[0];
+    if (!userLastName.trim() || userLastName.includes('@')) userLastName = 'SEAT Corporate';
+
+    userFirstName = userFirstName.trim();
+    userLastName = userLastName.trim();
+
+    if (!userEmail.trim()) {
+      await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error: Email field (customfield_10088) is empty.`));
+      return;
+    }
+
     // RUTA A: ADOBE (CMS)
     if (esAltaAdobeValida) {
       console.log(`📬 [WEBHOOK JIRA] Processing Adobe provisioning for ${ticketKey}...`);
@@ -81,13 +96,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
       res.status(200).send('Processing Adobe started.');
 
       try {
-        const userEmail = fields.customfield_10088;
-        let userFirstName = typeof fields.customfield_10189 === 'object' ? (fields.customfield_10189.value || fields.customfield_10189.name || '') : fields.customfield_10189 || '';
-        let userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || '') : fields.customfield_10190 || '';
-
-        if (!userFirstName.trim() || userFirstName.includes('@')) userFirstName = userEmail.split('@')[0];
-        if (!userLastName.trim() || userLastName.includes('@')) userLastName = 'SEAT Corporate';
-
         const paisNombre = (fields.customfield_10257?.value || 'GLOBAL').trim();
         const idMarca = fields.customfield_10320?.id || fields.customfield_10320;
         const idPermiso = fields.customfield_10612?.id || fields.customfield_10612;
@@ -103,7 +111,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
         if (marcasAAgregar.length === 0) return console.log('⚠️ No brands detected.');
 
         const gruposAdobeFinales = marcasAAgregar.map(brand => `SEAT_CUPRA_${paisNombre}_${brand}_Website_${permisoTexto}_IMS`);
-        const resultadoAdobe = await crearUsuarioEnAdobe(userEmail, userFirstName.trim(), userLastName.trim(), gruposAdobeFinales);
+        const resultadoAdobe = await crearUsuarioEnAdobe(userEmail, userFirstName, userLastName, gruposAdobeFinales);
 
         let comentarioJira = '';
         if (resultadoAdobe.success) {
@@ -111,18 +119,10 @@ expressApp.post('/jira-webhook', async (req, res) => {
           comentarioJira = `🤖 *[HST Access SyncBot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
         } else {
           const errorMsg = resultadoAdobe.errorReason || '';
-          let diagnosticoSoporte = '';
-
+          let diagnosticoSoporte = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n📌 *IT Diagnostic:* General error returned by Adobe endpoint: \`${errorMsg}\`.`;
           if (errorMsg.includes("createFederatedID")) {
             diagnosticoSoporte = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n📌 *IT Diagnostic:* This user's email domain has corporate directory synchronization enabled. To complete this request, an administrator must log into the *Adobe Admin Console*, locate the directory for this domain, and manually check the option *'Enable editing for 1 hour'* before re-triggering this transition.`;
-          } else if (errorMsg.includes("401") || errorMsg.includes("unauthorized") || errorMsg.includes("JWT")) {
-            diagnosticoSoporte = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n📌 *IT Diagnostic:* Bot authentication error. The Adobe API credentials assigned in Render environment variables have expired or are incorrect. Please verify the Client Secret.`;
-          } else if (errorMsg.includes("country")) {
-            diagnosticoSoporte = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n📌 *IT Diagnostic:* The country code provided is not supported by SEAT's Adobe Console. Please check the Market field in the Jira form.`;
-          } else {
-            diagnosticoSoporte = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n📌 *IT Diagnostic:* General error returned by Adobe endpoint: \`${errorMsg}\`.`;
           }
-
           comentarioJira = diagnosticoSoporte;
         }
         await añadirComentarioJira(ticketKey, comentarioCompleto(comentarioJira));
@@ -130,7 +130,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
       finally { setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000); }
     }
 
-    // RUTA B: JIRA (HOLA SUPPORT)
+    // RUTA B: JIRA (HOLA SUPPORT) - USANDO CAMPOS DEL FORMULARIO IGUAL QUE AEM
     else if (esAltaJiraValida) {
       console.log(`📬 [WEBHOOK JIRA] Processing Jira provisioning for ${ticketKey}...`);
       ticketsProcesadosConExito.add(ticketKey);
@@ -138,26 +138,27 @@ expressApp.post('/jira-webhook', async (req, res) => {
       res.status(200).send('Processing Jira started.');
 
       try {
-        const accountIdUser = issue.fields?.reporter?.accountId;
-        const userEmail = fields.customfield_10088 || issue.fields?.reporter?.emailAddress || 'unknown';
+        // Buscamos o creamos la cuenta basándonos estrictamente en los campos del formulario extraídos arriba
+        console.log(`👤 [BOT] Provisioning user ${userEmail} (${userFirstName} ${userLastName}) in Jira Cloud...`);
+        const resultadoUsuario = await asegurarUsuarioEnJira(userEmail, userFirstName, userLastName);
 
-        if (!accountIdUser) {
-          await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error: Could not locate Jira accountId for group assignment.`));
+        if (!resultadoUsuario.success) {
+          await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Failed to provision user in Jira directory.\n\n- Reason: ${resultadoUsuario.errorReason}`));
           return;
         }
 
-        // Nombres corregidos en texto plano
+        const realAccountId = resultadoUsuario.accountId;
         const gruposJira = ['Guest-Confluence_HST', 'Triger_Comment'];
         let erroresGrupos = [];
 
         for (const grupo of gruposJira) {
-          const resGrupo = await añadirUsuarioAGrupoJira(accountIdUser, grupo);
+          const resGrupo = await añadirUsuarioAGrupoJira(realAccountId, grupo);
           if (!resGrupo.success) erroresGrupos.push(`${grupo} (${resGrupo.errorReason})`);
         }
 
         let comentarioJira = '';
         if (erroresGrupos.length === 0) {
-          comentarioJira = `🤖 *[HST Access SyncBot]* User licensed and provisioned successfully in Jira Cloud.\n\n- User: ${userEmail}\n- Role: Customer (Non-Agent)\n- Assigned Groups: ${gruposJira.map(g => `\`${g}\``).join(', ')}`;
+          comentarioJira = `🤖 *[HST Access SyncBot]* User licensed and provisioned successfully in Jira Cloud.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${gruposJira.map(g => `\`${g}\``).join(', ')}`;
         } else {
           comentarioJira = `⚠️ *[HST Access SyncBot]* Provisioning partial failure in Jira Groups.\n\n- Failed Groups: ${erroresGrupos.join(', ')}`;
         }
@@ -203,10 +204,7 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     const fields = ticketRes.data?.fields || {};
 
     const idPadre = String(fields.customfield_10623?.id || fields.customfield_10623 || '');
-    
-    const cabeceraPlataforma = idPadre === '12361' 
-      ? 'New access request for HOLA Support' 
-      : 'New access request for One.CMS (AEM)';
+    const cabeceraPlataforma = idPadre === '12361' ? 'New access request for HOLA Support' : 'New access request for One.CMS (AEM)';
 
     let userFirstName = typeof fields.customfield_10189 === 'object' ? (fields.customfield_10189.value || fields.customfield_10189.name || '') : fields.customfield_10189 || '';
     let userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || '') : fields.customfield_10190 || '';
@@ -243,72 +241,8 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 });
 
 // ==========================================
-// API AUXILIAR: ALTA EN GRUPOS DE JIRA
+// API AUXILIAR: BUSCAR O CREAR USUARIO EN JIRA CLOUD USANDO EL FORMULARIO
 // ==========================================
-async function añadirUsuarioAGrupoJira(accountId, grupoNombre) {
+async function asegurarUsuarioEnJira(email, firstName, lastName) {
   try {
-    const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/group/user?groupname=${encodeURIComponent(grupoNombre)}`;
-    const response = await axios.post(url, { accountId: accountId }, { headers: JIRA_HEADERS });
-    if (response.status === 201 || response.status === 200) return { success: true };
-    return { success: false, errorReason: `Status ${response.status}` };
-  } catch (error) {
-    let msg = error.message;
-    if (error.response && error.response.data) msg = typeof error.response.data === 'object' ? JSON.stringify(error.response.data) : error.response.data;
-    return { success: false, errorReason: msg };
-  }
-}
-
-// ==========================================
-// API AUXILIAR: ALTA EN GRUPOS DE ADOBE
-// ==========================================
-async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
-  try {
-    const tokenUrl = 'https://ims-na1.adobelogin.com/ims/token/v3';
-    const params = new URLSearchParams();
-    params.append('grant_type', 'client_credentials');
-    params.append('client_id', process.env.ADOBE_CLIENT_ID);
-    params.append('client_secret', process.env.ADOBE_CLIENT_SECRET);
-    params.append('scope', 'openid,AdobeID,user_management_sdk');
-
-    const tokenResponse = await axios.post(tokenUrl, params, { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-    const accessToken = tokenResponse.data.access_token;
-
-    const adobeEndpoint = `https://usermanagement.adobe.io/v2/usermanagement/action/${process.env.ADOBE_ORG_ID}`;
-    const adobePayload = [{
-      "user": email,
-      "do": [
-        { "createFederatedID": { "email": email, "country": "ES", "firstname": firstName, "lastname": lastName } },
-        { "add": { "group": grupos } }
-      ]
-    }];
-
-    const apiResponse = await axios.post(adobeEndpoint, adobePayload, {
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'X-Api-Key': process.env.ADOBE_CLIENT_ID, 'Content-Type': 'application/json' }
-    });
-
-    if (apiResponse.data?.completed === 0 && apiResponse.data?.errors?.length > 0) {
-      const errorDetalle = apiResponse.data.errors[0];
-      if (errorDetalle.errorCode === "error.user.already_in_org") return { success: true };
-      return { success: false, errorReason: errorDetalle.message || errorDetalle.errorCode };
-    }
-    return { success: true };
-  } catch (error) {
-    let msg = error.message;
-    if (error.response && error.response.data) msg = JSON.stringify(error.response.data);
-    return { success: false, errorReason: msg };
-  }
-}
-
-async function añadirComentarioJira(ticketKey, bodyContent) {
-  const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/comment`;
-  const payloadInterno = { ...bodyContent, properties: [{ key: "sd.public.comment", value: { internal: true } }] };
-  await axios.post(url, payloadInterno, { headers: JIRA_HEADERS });
-}
-
-function comentarioCompleto(texto) {
-  return { body: { type: "doc", version: 1, content: [{ type: "paragraph", content: [{ type: "text", text: texto }] }] } };
-}
-
-expressApp.listen(PORT, () => {
-  console.log(`🚀 HST Access SyncBot running stably on port ${PORT}`);
-});
+    //
