@@ -1,5 +1,3 @@
-// abc
-
 require('dotenv').config();
 const express = require('express');
 const { App, ExpressReceiver } = require('@slack/bolt');
@@ -47,21 +45,36 @@ expressApp.post('/jira-webhook', async (req, res) => {
   const fields = issue.fields || {};
   const currentStatus = fields.status?.name || '';
 
+  // 1. CONTROL ANTI-DUPLICADOS ETERNO: Comprobación arriba
   if (ticketsProcesadosConExito.has(ticketKey)) {
-    console.log(`🛑 [ANTI-DUPLICADO ETERNO] El ticket ${ticketKey} ya fue procesado con éxito. Ignorando.`);
+    console.log(`🛑 [ANTI-DUPLICADO ETERNO] El ticket ${ticketKey} ya fue procesado con éxito o dio error. Ignorando.`);
     return res.status(200).send('Already processed in the past.');
   }
 
+  // 2. CONTROL ANTI-DUPLICADOS TEMPORAL (Ráfagas rápidas)
   if (ticketsEnProcesoTemporal.has(ticketKey)) {
     console.log(`🛑 [ANTI-DUPLICADO TEMPORAL] Ráfaga detectada para ${ticketKey}. Ignorando.`);
     return res.status(200).send('Duplicate request ignored.');
   }
 
+  // 3. PUNTO 3: FILTRO DE ACCIÓN (NEW/MODIFY VS DELETE)
+  const campoAccion = fields.customfield_11728;
+  const idAccion = campoAccion?.id || campoAccion;
+
+  if (idAccion === '14665') {
+    console.log(`ℹ️ [JIRA WEBHOOK] Ticket ${ticketKey} es de tipo 'Delete current account'. No se realiza acción automática.`);
+    return res.status(200).send('Manual deletion request. No action taken.');
+  }
+
   const idPadre = fields.customfield_10623?.id || fields.customfield_10623;
   const idHijo = fields.customfield_10620?.id || fields.customfield_10620;
 
-  if (currentStatus === 'Request Approved' && idPadre === '12362' && idHijo === '12350') {
-    console.log(`📬 [WEBHOOK JIRA] ¡Petición válida recibida para ${ticketKey}! Activando bloqueos...`);
+  // Solo procesamos automáticamente si es la transición correcta y es un alta/modificación (14664)
+  if (currentStatus === 'Request Approved' && idPadre === '12362' && idHijo === '12350' && idAccion === '14664') {
+    console.log(`📬 [WEBHOOK JIRA] ¡Petición de Alta válida recibida para ${ticketKey}! Activando bloqueos...`);
+    
+    // FIJADO: Registramos el bloqueo permanente YA para que no duplique pase lo que pase con Adobe
+    ticketsProcesadosConExito.add(ticketKey);
     ticketsEnProcesoTemporal.add(ticketKey);
 
     res.status(200).send('Processing started.');
@@ -114,7 +127,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
       if (marcasAAgregar.length === 0) {
         console.log('⚠️ [ERROR] No se han detectado marcas válidas en el ticket.');
-        ticketsEnProcesoTemporal.delete(ticketKey);
         return;
       }
 
@@ -130,9 +142,13 @@ expressApp.post('/jira-webhook', async (req, res) => {
       if (resultadoAdobe.success) {
         const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
         comentarioJira = `🤖 *[Bot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
-        ticketsProcesadosConExito.add(ticketKey);
       } else {
-        comentarioJira = `⚠️ *[Bot]* Auto-provisioning failed in Adobe Admin Console.\n\n- Reason: ${resultadoAdobe.errorReason}`;
+        // PUNTO 2: DETECCIÓN INTELIGENTE DE ERROR DE ACCESO/SYNC DE ADOBE
+        let notaSincronizacion = "";
+        if (resultadoAdobe.errorReason && resultadoAdobe.errorReason.includes("createFederatedID")) {
+          notaSincronizacion = "\n\n*Note:* Please double-check that the directory synchronization or 1-hour editing window is enabled in Adobe Admin Console for this domain.";
+        }
+        comentarioJira = `⚠️ *[Bot]* Auto-provisioning failed in Adobe Admin Console.\n\n- Reason: ${resultadoAdobe.errorReason}${notaSincronizacion}`;
       }
       
       console.log('💬 [JIRA] Añadiendo el comentario definitivo interno al ticket...');
@@ -147,7 +163,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
       }, 10000);
     }
   } else {
-    res.status(200).send('Conditions not met.');
+    res.status(200).send('Conditions not met or Action Type excluded.');
   }
 });
 
@@ -173,7 +189,6 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // Desvanecimiento rápido de botones manteniendo cabecera original
   await ack({
     text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmailDetectado}\n\n🔄 _Processing approval (Requested by <@${userId}>)..._`,
     replace_original: true
@@ -215,7 +230,6 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
-    // Respuesta editada con la maqueta final que solicitaste
     await respond({
       text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmailDetectado}\n\n Approved and processed successfully.\nAction executed by <@${userId}>. Status moved to *Request Approved*.\n\n*User Profile managed:*\n- Name: ${userFirstName.trim()} ${userLastName.trim()}\n- Market: ${mercado}\n- Permission: ${permisoSlack}`,
       replace_original: true
