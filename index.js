@@ -133,7 +133,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
         comentarioJira = `⚠️ *[Bot]* Auto-provisioning failed in Adobe Admin Console.\n\n- Reason: ${resultadoAdobe.errorReason}`;
       }
       
-      console.log('💬 [JIRA] Añadiendo el comentario definitivo al ticket...');
+      console.log('💬 [JIRA] Añadiendo el comentario definitivo interno al ticket...');
       await añadirComentarioJira(ticketKey, comentarioCompleto(comentarioJira));
 
     } catch (error) {
@@ -150,15 +150,13 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK (DATA DE BOTÓN NATIVA)
+// 2. INTERACTIVIDAD SLACK
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   const userId = body.user.id;
-  
-  // MODIFICACIÓN DE EXTRACCIÓN: Soportamos tanto el formato antiguo como el nuevo combinado
   const botonValorRaw = body.actions[0].value || ''; 
   let ticketKey = botonValorRaw;
-  let userEmailDetectado = 'developer.test@seat.de'; // Respaldo estático solicitado
+  let userEmailDetectado = 'developer.test@seat.de'; 
 
   if (botonValorRaw.includes('_')) {
     const partes = botonValorRaw.split('_');
@@ -167,22 +165,20 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   }
 
   const ticketUrl = `https://${process.env.JIRA_DOMAIN}/browse/${ticketKey}`;
-  console.log(`🖱️ [SLACK] Clic detectado para ticket ${ticketKey} y usuario ${userEmailDetectado}`);
 
   if (ALLOWED_APPROVERS.length > 0 && !ALLOWED_APPROVERS.includes(userId)) {
-    console.log(`❌ [SLACK] Acceso denegado a <@${userId}>.`);
     await ack(); 
     return await respond({ text: `❌ Sorry, you do not have permission.`, replace_original: false });
   }
 
-  // Primera respuesta rápida: destruimos los botones manteniendo intacto el bloque superior
+  // Desvanecimiento rápido de botones manteniendo cabecera original
   await ack({
     text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmailDetectado}\n\n🔄 _Processing approval (Requested by <@${userId}>)..._`,
     replace_original: true
   });
 
   try {
-    console.log(`🔍 [SLACK ACTION] Consultando detalles del ticket ${ticketKey} en Jira...`);
+    console.log(`🔍 [SLACK ACTION] Consultando detalles de ${ticketKey} en Jira...`);
     const ticketRes = await axios.get(`https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}`, { headers: JIRA_HEADERS });
     const fields = ticketRes.data?.fields || {};
 
@@ -207,7 +203,6 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
       permisoSlack = 'Edition (+preview)';
     }
 
-    console.log(`🔧 [JIRA API] Transicionando estado de ${ticketKey}...`);
     const transUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
     const resTrans = await axios.get(transUrl, { headers: JIRA_HEADERS });
     
@@ -218,7 +213,7 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
-    // RESPUESTA DEFINITIVA RECONSTRUIDA: Mantiene exactamente la cabecera con el email inyectado de forma nativa
+    // Respuesta editada con la maqueta final que solicitaste
     await respond({
       text: `🚨 *New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n• *User:* ${userEmailDetectado}\n\n Approved and processed successfully.\nAction executed by <@${userId}>. Status moved to *Request Approved*.\n\n*User Profile managed:*\n- Name: ${userFirstName.trim()} ${userLastName.trim()}\n- Market: ${mercado}\n- Permission: ${permisoSlack}`,
       replace_original: true
@@ -234,7 +229,7 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
 });
 
 // ==========================================
-// API REAL DE ADOBE (RETORNA STATUS + ERROR)
+// API REAL DE ADOBE
 // ==========================================
 async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
   try {
@@ -289,9 +284,23 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
   }
 }
 
+// Envío forzado de comentario interno en Jira Service Management
 async function añadirComentarioJira(ticketKey, bodyContent) {
   const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/comment`;
-  await axios.post(url, bodyContent, { headers: JIRA_HEADERS });
+  
+  const payloadInterno = {
+    ...bodyContent,
+    properties: [
+      {
+        key: "sd.public.comment",
+        value: {
+          internal: true
+        }
+      }
+    ]
+  };
+
+  await axios.post(url, payloadInterno, { headers: JIRA_HEADERS });
 }
 
 function comentarioCompleto(texto) {
