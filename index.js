@@ -30,11 +30,11 @@ const expressApp = receiver.app;
 expressApp.use(express.json());
 
 expressApp.get('/', (req, res) => {
-  res.status(200).send('🚀 Adobe SyncBot is online.');
+  res.status(200).send('🚀 HST Access SyncBot is online.');
 });
 
 // ==========================================
-// 1. JIRA WEBHOOK: ALTA REAL EN ADOBE
+// 1. JIRA WEBHOOK: ALTA EN ADOBE O JIRA
 // ==========================================
 expressApp.post('/jira-webhook', async (req, res) => {
   const issue = req.body?.issue;
@@ -62,90 +62,100 @@ expressApp.post('/jira-webhook', async (req, res) => {
     return res.status(200).send('Manual deletion request.');
   }
 
-  const idPadre = fields.customfield_10623?.id || fields.customfield_10623;
-  const idHijo = fields.customfield_10620?.id || fields.customfield_10620;
+  const idPadre = String(fields.customfield_10623?.id || fields.customfield_10623 || '');
+  const idHijo = String(fields.customfield_10620?.id || fields.customfield_10620 || '');
 
-  if (currentStatus === 'Request Approved' && idPadre === '12362' && idHijo === '12350' && idAccion === '14664') {
-    console.log(`📬 [WEBHOOK JIRA] Procesando alta para ${ticketKey}...`);
+  // El bot ahora acepta de manera flexible cualquier ID de hijo dentro del array para que no falle si cambia
+  const hijosValidosAdobe = ['12350']; 
+  const hijosValidosJira = ['12350']; 
+
+  const esAltaAdobeValida = (idPadre === '12362' && hijosValidosAdobe.includes(idHijo));
+  const esAltaJiraValida = (idPadre === '12361' && hijosValidosJira.includes(idHijo));
+
+  if (currentStatus === 'Request Approved' && idAccion === '14664' && (esAltaAdobeValida || esAltaJiraValida)) {
     
-    ticketsProcesadosConExito.add(ticketKey);
-    ticketsEnProcesoTemporal.add(ticketKey);
+    // RUTA A: ADOBE (CMS)
+    if (esAltaAdobeValida) {
+      console.log(`📬 [WEBHOOK JIRA] Procesando alta de ADOBE para ${ticketKey}...`);
+      ticketsProcesadosConExito.add(ticketKey);
+      ticketsEnProcesoTemporal.add(ticketKey);
+      res.status(200).send('Processing Adobe started.');
 
-    res.status(200).send('Processing started.');
+      try {
+        const userEmail = fields.customfield_10088;
+        let userFirstName = typeof fields.customfield_10189 === 'object' ? (fields.customfield_10189.value || fields.customfield_10189.name || '') : fields.customfield_10189 || '';
+        let userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || '') : fields.customfield_10190 || '';
 
-    try {
-      const userEmail = fields.customfield_10088;
-      
-      let userFirstName = '';
-      let userLastName = '';
+        if (!userFirstName.trim() || userFirstName.includes('@')) userFirstName = userEmail.split('@')[0];
+        if (!userLastName.trim() || userLastName.includes('@')) userLastName = 'SEAT Corporate';
 
-      if (fields.customfield_10189) {
-        userFirstName = typeof fields.customfield_10189 === 'object' ? (fields.customfield_10189.value || fields.customfield_10189.name || '') : fields.customfield_10189;
-      }
-      if (fields.customfield_10190) {
-        userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || '') : fields.customfield_10190;
-      }
+        const paisNombre = (fields.customfield_10257?.value || 'GLOBAL').trim();
+        const idMarca = fields.customfield_10320?.id || fields.customfield_10320;
+        const idPermiso = fields.customfield_10612?.id || fields.customfield_10612;
 
-      if (!userFirstName.trim() || userFirstName.includes('@')) userFirstName = userEmail.split('@')[0];
-      if (!userLastName.trim() || userLastName.includes('@')) userLastName = 'SEAT Corporate';
+        let permisoTexto = 'Preview';
+        if (idPermiso === '12322') permisoTexto = 'Editor';
 
-      userFirstName = userFirstName.trim();
-      userLastName = userLastName.trim();
+        let marcasAAgregar = [];
+        if (idMarca === '11247') marcasAAgregar.push('SEAT');
+        if (idMarca === '11248') marcasAAgregar.push('CUPRA');
+        if (idMarca === '11249') marcasAAgregar.push('SEAT', 'CUPRA');
 
-      const campoPais = fields.customfield_10257; 
-      const campoMarca = fields.customfield_10320; 
-      const campoPermiso = fields.customfield_10612;
+        if (marcasAAgregar.length === 0) return console.log('⚠️ No se han detectado marcas.');
 
-      const paisNombre = (campoPais?.value || 'GLOBAL').trim();
-      const idMarca = campoMarca?.id || campoMarca;
-      const idPermiso = campoPermiso?.id || campoPermiso;
+        const gruposAdobeFinales = marcasAAgregar.map(brand => `SEAT_CUPRA_${paisNombre}_${brand}_Website_${permisoTexto}_IMS`);
+        const resultadoAdobe = await crearUsuarioEnAdobe(userEmail, userFirstName.trim(), userLastName.trim(), gruposAdobeFinales);
 
-      let permisoTexto = 'Preview';
-      if (idPermiso === '12322') permisoTexto = 'Editor';
-
-      let marcasAAgregar = [];
-      if (idMarca === '11247') marcasAAgregar.push('SEAT');
-      if (idMarca === '11248') marcasAAgregar.push('CUPRA');
-      if (idMarca === '11249') marcasAAgregar.push('SEAT', 'CUPRA');
-
-      if (marcasAAgregar.length === 0) {
-        console.log('⚠️ [ERROR] No se han detectado marcas válidas.');
-        return;
-      }
-
-      const gruposAdobeFinales = marcasAAgregar.map(brand => `SEAT_CUPRA_${paisNombre}_${brand}_Website_${permisoTexto}_IMS`);
-
-      console.log(`👥 [ADOBE] Solicitando asignación para ${userEmail}...`);
-      const resultadoAdobe = await crearUsuarioEnAdobe(userEmail, userFirstName, userLastName, gruposAdobeFinales);
-
-      let comentarioJira = '';
-      if (resultadoAdobe.success) {
-        const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
-        comentarioJira = `🤖 *[Adobe SyncBot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
-      } else {
-        const errorMsg = resultadoAdobe.errorReason || '';
-        let diagnosticoSoporte = '';
-
-        if (errorMsg.includes("createFederatedID")) {
-          diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* El dominio de este correo electrónico corporativo tiene la sincronización automática de directorios encendida. Para tramitar este ticket, un administrador debe acceder a la *Adobe Admin Console*, buscar el directorio de este país y activar manualmente la casilla *'Enable editing for 1 hour'* (Permitir edición durante 1 hora) antes de reintentar el alta.`;
-        } else if (errorMsg.includes("401") || errorMsg.includes("unauthorized") || errorMsg.includes("JWT")) {
-          diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* Error de autenticación del Bot. Las credenciales de la API de Adobe asignadas en las variables de entorno de Render han caducado o son incorrectas. Por favor, revisa el Client Secret corporativo.`;
-        } else if (errorMsg.includes("country")) {
-          diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* El código de país asignado en la petición no está admitido por la consola de Adobe de SEAT. Revisa el campo de Mercado del formulario de Jira.`;
+        let comentarioJira = '';
+        if (resultadoAdobe.success) {
+          const listaGruposTexto = gruposAdobeFinales.map(g => `\`${g}\``).join(', ');
+          comentarioJira = `🤖 *[HST Access SyncBot]* User created successfully in Adobe IMS.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${listaGruposTexto}`;
         } else {
-          diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* Error general en la consola de Adobe Admin Console. Detalles técnicos devuelvos por el endpoint: \`${errorMsg}\`.`;
+          const errorMsg = resultadoAdobe.errorReason || '';
+          let diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* Error general en Adobe. Detalles: \`${errorMsg}\`.`;
+          if (errorMsg.includes("createFederatedID")) {
+            diagnosticoSoporte = `\n\n📌 *Diagnóstico de IT:* El dominio de este correo tiene el Sync activo. Ve a *Adobe Admin Console* y activa *'Enable editing for 1 hour'* antes de reintentar.`;
+          }
+          comentarioJira = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n- Reason: ${errorMsg}${diagnosticoSoporte}`;
+        }
+        await añadirComentarioJira(ticketKey, comentarioCompleto(comentarioJira));
+      } catch (err) { console.error('💥 Error ruta Adobe:', err.message); }
+      finally { setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000); }
+    }
+
+    // RUTA B: JIRA (HOLA SUPPORT)
+    else if (esAltaJiraValida) {
+      console.log(`📬 [WEBHOOK JIRA] Procesando alta de JIRA para ${ticketKey}...`);
+      ticketsProcesadosConExito.add(ticketKey);
+      ticketsEnProcesoTemporal.add(ticketKey);
+      res.status(200).send('Processing Jira started.');
+
+      try {
+        const accountIdUser = issue.fields?.reporter?.accountId;
+        const userEmail = fields.customfield_10088 || issue.fields?.reporter?.emailAddress || 'unknown';
+
+        if (!accountIdUser) {
+          await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error: No se pudo localizar el accountId del usuario en Jira para asignar los grupos.`));
+          return;
         }
 
-        comentarioJira = `⚠️ *[Adobe SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n- Reason: ${errorMsg}${diagnosticoSoporte}`;
-      }
-      
-      console.log('💬 [JIRA] Añadiendo el comentario definitivo interno al ticket...');
-      await añadirComentarioJira(ticketKey, comentarioCompleto(comentarioJira));
+        const gruposJira = ['f72d3948-1297-4126-be44-0cf5d895d13f', '23b4e346-471b-4144-a24b-49740dc23657'];
+        let erroresGrupos = [];
 
-    } catch (error) {
-      console.error('💥 [ERROR CRÍTICO WEBHOOK]:', error.message);
-    } finally {
-      setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000);
+        for (const grupo of gruposJira) {
+          const resGrupo = await añadirUsuarioAGrupoJira(accountIdUser, grupo);
+          if (!resGrupo.success) erroresGrupos.push(`${grupo} (${resGrupo.errorReason})`);
+        }
+
+        let comentarioJira = '';
+        if (erroresGrupos.length === 0) {
+          comentarioJira = `🤖 *[HST Access SyncBot]* User licensed and provisioned successfully in Jira Cloud.\n\n- User: ${userEmail}\n- Role: Customer (Non-Agent)\n- Assigned Groups: ${gruposJira.map(g => `\`${g}\``).join(', ')}`;
+        } else {
+          comentarioJira = `⚠️ *[HST Access SyncBot]* Provisioning partial failure in Jira Groups.\n\n- Failed Groups: ${erroresGrupos.join(', ')}`;
+        }
+        await añadirComentarioJira(ticketKey, comentarioCompleto(comentarioJira));
+      } catch (err) { console.error('💥 Error ruta Jira:', err.message); }
+      finally { setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000); }
     }
   } else {
     res.status(200).send('Conditions not met.');
@@ -175,24 +185,23 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   }
 
   await ack({
-    text: `*New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n*User Profile requested:*\n• *Mail:* ${userEmailDetectado}\n\n🔄 _Processing approval (Requested by <@${userId}>)..._`,
+    text: `*New access request*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n*User Profile requested:*\n• *Mail:* ${userEmailDetectado}\n\n🔄 _Processing approval (Requested by <@${userId}>)..._`,
     replace_original: true
   });
 
   try {
-    console.log(`🔍 [SLACK ACTION] Consultando detalles de ${ticketKey} en Jira...`);
+    console.log(`🔍 [SLACK ACTION] Consultando detalles de ${ticketKey}...`);
     const ticketRes = await axios.get(`https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}`, { headers: JIRA_HEADERS });
     const fields = ticketRes.data?.fields || {};
 
-    let userFirstName = '';
-    let userLastName = '';
+    const idPadre = String(fields.customfield_10623?.id || fields.customfield_10623 || '');
+    
+    const cabeceraPlataforma = idPadre === '12361' 
+      ? 'New access request for HOLA Support' 
+      : 'New access request for One.CMS (AEM)';
 
-    if (fields.customfield_10189) {
-      userFirstName = typeof fields.customfield_10189 === 'object' ? (fields.customfield_10189.value || fields.customfield_10189.name || '') : fields.customfield_10189;
-    }
-    if (fields.customfield_10190) {
-      userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || '') : fields.customfield_10190;
-    }
+    let userFirstName = typeof fields.customfield_10189 === 'object' ? (fields.customfield_10189.value || fields.customfield_10189.name || '') : fields.customfield_10189 || '';
+    let userLastName = typeof fields.customfield_10190 === 'object' ? (fields.customfield_10190.value || fields.customfield_10190.name || '') : fields.customfield_10190 || '';
 
     if (!userFirstName.trim()) userFirstName = userEmailDetectado.split('@')[0];
     if (!userLastName.trim()) userLastName = 'SEAT Corporate';
@@ -200,33 +209,49 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
     const mercado = (fields.customfield_10257?.value || 'GLOBAL').trim();
     const permisoOriginal = (fields.customfield_10612?.value || fields.customfield_10612 || 'Preview').trim();
 
-    let permisoSlack = 'Preview';
+    let permisoSlack = permisoOriginal;
     if (permisoOriginal.toLowerCase() === 'editor') permisoSlack = 'Edition (+preview)';
+    if (idPadre === '12361') permisoSlack = 'Customer standard access';
 
     const transUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/transitions`;
     const resTrans = await axios.get(transUrl, { headers: JIRA_HEADERS });
-    
     const foundTransition = resTrans.data.transitions.find(t => t.name.toLowerCase() === 'request approved');
+    
     if (!foundTransition) throw new Error("Transition 'Request Approved' not found.");
-
     await axios.post(transUrl, { transition: { id: foundTransition.id } }, { headers: JIRA_HEADERS });
 
     await respond({
-      text: `*New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n*User Profile managed:*\n• *Mail:* ${userEmailDetectado}\n• *Name:* ${userFirstName.trim()} ${userLastName.trim()}\n• *Market:* ${mercado}\n• *Permission:* ${permisoSlack}\n\n Approved and processed successfully.\nAction executed by <@${userId}>. Status moved to *Request Approved*.`,
+      text: `*${cabeceraPlataforma}*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n*User Profile managed:*\n• *Mail:* ${userEmailDetectado}\n• *Name:* ${userFirstName.trim()} ${userLastName.trim()}\n• *Market:* ${mercado}\n• *Permission:* ${permisoSlack}\n\n Approved and processed successfully.\nAction executed by <@${userId}>. Status moved to *Request Approved*.`,
       replace_original: true
     });
 
   } catch (jiraError) {
     console.error('💥 [ERROR SLACK ACTION]:', jiraError.message);
     await respond({
-      text: `*New access request for One.CMS (AEM)*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n⚠️ *Slack action registered, but Jira update encountered an issue:* ${jiraError.message}`,
+      text: `*New access request*\n• *Ticket:* <${ticketUrl}|${ticketKey}>\n\n⚠️ *Slack action registered, but Jira update encountered an issue:* ${jiraError.message}`,
       replace_original: true
     });
   }
 });
 
 // ==========================================
-// API REAL DE ADOBE
+// API AUXILIAR: ALTA EN GRUPOS DE JIRA
+// ==========================================
+async function añadirUsuarioAGrupoJira(accountId, grupoNombre) {
+  try {
+    const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/group/user?groupname=${encodeURIComponent(grupoNombre)}`;
+    const response = await axios.post(url, { accountId: accountId }, { headers: JIRA_HEADERS });
+    if (response.status === 201 || response.status === 200) return { success: true };
+    return { success: false, errorReason: `Status ${response.status}` };
+  } catch (error) {
+    let msg = error.message;
+    if (error.response && error.response.data) msg = typeof error.response.data === 'object' ? JSON.stringify(error.response.data) : error.response.data;
+    return { success: false, errorReason: msg };
+  }
+}
+
+// ==========================================
+// API AUXILIAR: ALTA EN GRUPOS DE ADOBE
 // ==========================================
 async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
   try {
@@ -241,23 +266,11 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
     const accessToken = tokenResponse.data.access_token;
 
     const adobeEndpoint = `https://usermanagement.adobe.io/v2/usermanagement/action/${process.env.ADOBE_ORG_ID}`;
-    
     const adobePayload = [{
       "user": email,
       "do": [
-        { 
-          "createFederatedID": {
-            "email": email,
-            "country": "ES",
-            "firstname": firstName,
-            "lastname": lastName
-          } 
-        },
-        { 
-          "add": { 
-            "group": grupos 
-          } 
-        }
+        { "createFederatedID": { "email": email, "country": "ES", "firstname": firstName, "lastname": lastName } },
+        { "add": { "group": grupos } }
       ]
     }];
 
@@ -267,12 +280,9 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
 
     if (apiResponse.data?.completed === 0 && apiResponse.data?.errors?.length > 0) {
       const errorDetalle = apiResponse.data.errors[0];
-      if (errorDetalle.errorCode === "error.user.already_in_org") {
-        return { success: true };
-      }
+      if (errorDetalle.errorCode === "error.user.already_in_org") return { success: true };
       return { success: false, errorReason: errorDetalle.message || errorDetalle.errorCode };
     }
-
     return { success: true };
   } catch (error) {
     let msg = error.message;
@@ -282,32 +292,15 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
 }
 
 async function añadirComentarioJira(ticketKey, bodyContent) {
-  const url = `https://` + process.env.JIRA_DOMAIN + `/rest/api/3/issue/${ticketKey}/comment`;
-  
-  const payloadInterno = {
-    ...bodyContent,
-    properties: [
-      {
-        key: "sd.public.comment",
-        value: {
-          internal: true
-        }
-      }
-    ]
-  };
-
+  const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/issue/${ticketKey}/comment`;
+  const payloadInterno = { ...bodyContent, properties: [{ key: "sd.public.comment", value: { internal: true } }] };
   await axios.post(url, payloadInterno, { headers: JIRA_HEADERS });
 }
 
 function comentarioCompleto(texto) {
-  return {
-    body: {
-      type: "doc", version: 1,
-      content: [{ type: "paragraph", content: [{ type: "text", text: texto }] }]
-    }
-  };
+  return { body: { type: "doc", version: 1, content: [{ type: "paragraph", content: [{ type: "text", text: texto }] }] } };
 }
 
 expressApp.listen(PORT, () => {
-  console.log(`🚀 Adobe SyncBot running stably on port ${PORT}`);
+  console.log(`🚀 HST Access SyncBot running stably on port ${PORT}`);
 });
