@@ -193,14 +193,18 @@ expressApp.post('/jira-webhook', async (req, res) => {
         }
 
         const realAccountId = resultadoUsuario.accountId;
-        console.log(`✅ [BOT] Customer profile active with ID: ${realAccountId}. Granting Confluence Guest access...`);
+        console.log(`✅ [BOT] Customer profile active with ID: ${realAccountId}. Adding to Service Desk 122...`);
 
-        // Concedemos el acceso como Guest a Confluence vinculándolo de forma nativa al registro de clientes del portal
-        const urlGuestAccess = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/customers`;
-        await axios.post(urlGuestAccess, { usernames: [userEmail] }, { headers: JIRA_HEADERS });
+        // Mapeo exacto de la lógica de Java: añadir al Service Desk 122 mediante POST
+        const serviceDeskId = "122"; 
+        const urlAddSD = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/${serviceDeskId}/customer`;
+        const payloadSD = { usernames: [userEmail] };
+
+        await axios.post(urlAddSD, payloadSD, { headers: JIRA_HEADERS });
+        console.log(`🎉 [BOT] User successfully mapped into Service Desk 122 registry.`);
 
         // 1. Registro interno en las notas del ticket para los agentes
-        await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* Customer created successfully in Jira Service Desk.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Access: Confluence Guest authorized via portal registry.`), true);
+        await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* Customer created and mapped successfully in Jira Service Desk.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Service Desk: ${serviceDeskId}\n- Access: Confluence Guest authorized via portal registry.`), true);
         
         // 2. Comentario externo público de cierre para el usuario
         const mensajePublicoJira = `Hello,\n\nThe user has been created in Jira Cloud. We have sent the instructions to the mail requested, we proceed to close this ticket.\n\nBest regards.`;
@@ -213,7 +217,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
         console.error('💥 Jira customer route error:', err.message);
         let errorDetails = err.message;
         if (err.response && err.response.data) errorDetails = JSON.stringify(err.response.data);
-        await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error during Confluence Guest assignment.\n\n- Details: ${errorDetails}`), true);
+        await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error mapping user to Service Desk 122.\n\n- Details: ${errorDetails}`), true);
       } finally { 
         setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000); 
       }
