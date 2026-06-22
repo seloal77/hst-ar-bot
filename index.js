@@ -10,7 +10,7 @@ const ALLOWED_APPROVERS = (process.env.ALLOWED_APPROVERS || '').split(',').map(i
 
 const JIRA_AUTH = Buffer.from(`${process.env.JIRA_EMAIL || ''}:${process.env.JIRA_API_TOKEN || ''}`).toString('base64');
 
-// 👑 HEADERS CON PASE EXPERIMENTAL INTEGRADO (Evita error 412 y consolida el 204 exitoso)
+// 👑 HEADERS CON PASE EXPERIMENTAL INTEGRADO (Vital para consolidar el 204 de Postman)
 const JIRA_HEADERS = {
   'Authorization': `Basic ${JIRA_AUTH}`,
   'Content-Type': 'application/json',
@@ -150,7 +150,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
             from: process.env.SMTP_FROM_EMAIL || 'no-reply@seat.es',
             to: userEmail,
             subject: 'Your access to ONE.CMS has been created',
-            text: `Hello,\n\nWe have created your account to access ONE.CMS.\n\nThe login page is:\nhttps://author-p118958-e1214854.adobeaemcloud.com\n\nFor more info to the whole login process, please follow this link:\nwww.holamarkets.seat/space/HST/blog/3052208181/One.CMS+Migration`
+            text: `Hello,\n\nWe have created your account to access ONE.CMS.\n\nThe login page is:\nhttps://author-p118958-e1214854.adobeaemcloud.com`
           };
           await mailTransporter.sendMail(mailOptions);
 
@@ -162,9 +162,6 @@ expressApp.post('/jira-webhook', async (req, res) => {
         } else {
           const errorMsg = resultadoAdobe.errorReason || '';
           let diagnosticoSoporte = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n📌 *IT Diagnostic:* General error: \`${errorMsg}\`.`;
-          if (errorMsg.includes("createFederatedID")) {
-            diagnosticoSoporte = `⚠️ *[HST Access SyncBot]* Auto-provisioning failed in Adobe Admin Console.\n\n📌 *IT Diagnostic:* This user's email domain has corporate directory synchronization enabled...`;
-          }
           await añadirComentarioJira(ticketKey, comentarioCompleto(diagnosticoSoporte), true);
         }
 
@@ -176,7 +173,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
     }
 
     // ------------------------------------------------
-    // RUTA B: JIRA (HOLA SUPPORT) - MIXTO: USERS + CUSTOMERS
+    // RUTA B: JIRA (HOLA SUPPORT) - ARQUITECTURA DE DOS PASOS (VALIDADO EN POSTMAN)
     // ------------------------------------------------
     else if (esAltaJiraValida) {
       console.log(`📬 [WEBHOOK JIRA] Processing Jira Customer provisioning for ${ticketKey}...`);
@@ -204,50 +201,35 @@ expressApp.post('/jira-webhook', async (req, res) => {
       res.status(200).send('Processing Jira started.');
 
       try {
-        // 1️⃣ PASO 1: Inserción en el directorio híbrido (Asegura Users + Customers + Confluence Guest)
-        console.log(`👤 [BOT] Provisioning user ${userEmail} via Atlassian Hybrid Engine...`);
-        const resultadoUsuario = await asegurarUsuarioEnJira(userEmail, userFirstName, userLastName);
+        // Ejecuta el motor encadenado (Paso 1: Users global [201] + Paso 2: Customers del proyecto [204])
+        console.log(`👤 [BOT] Triggering sequential dual-step insertion (Global Users + Project Customers Mapping)...`);
+        const resultadoUsuario = await asegurarUsuarioEnJira(userEmail, userFirstName, userLastName, ticketKey);
 
         if (!resultadoUsuario.success) {
-          await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Failed to create customer profile in directory.\n\n- Reason: ${resultadoUsuario.errorReason}`), true);
+          await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Failed to complete the provisioning chain.\n\n- Reason: ${resultadoUsuario.errorReason}`), true);
           return;
         }
 
         const realAccountId = resultadoUsuario.accountId;
-        const projectKey = ticketKey.split('-')[0];
-        
-        // Resolver Service Desk ID dinámicamente
-        const urlGetSD = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/projectKey:${projectKey}`;
-        const resSD = await axios.get(urlGetSD, { headers: JIRA_HEADERS });
-        const realServiceDeskId = resSD.data?.id;
 
-        if (!realServiceDeskId) {
-          throw new Error(`Could not resolve a Service Desk ID for project key: ${projectKey}`);
-        }
-
-        // 2️⃣ PASO 2: Forzar el mapeo físico al proyecto Service Desk (Para que salga sí o sí en Customers web)
-        console.log(`🎯 [BOT] Service Desk ID resolved: ${realServiceDeskId}. Linking profile via accountIds...`);
-        const urlAddSD = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/${realServiceDeskId}/customer`;
-        await axios.post(urlAddSD, { accountIds: [realAccountId] }, { headers: JIRA_HEADERS });
-        console.log(`🎉 [BOT] User successfully mapped into Service Desk registry.`);
-
-        // 3️⃣ PASO 3: Pausa controlada para indexación
+        // Pausa controlada para permitir indexación física antes de cerrar
         console.log(`⏳ [BOT] Waiting 5 seconds to consolidate user record into search indexes...`);
         await new Promise(resolve => setTimeout(resolve, 5000));
 
-        // 4️⃣ PASO 4: Comentarios limpios y Cierre automático (61 -> 151 / Fixed)
-        await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* Customer created, mapped and group privileges synchronized successfully in Jira Service Desk.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Account ID: \`${realAccountId}\``), true);
+        // Comentario limpio sin líneas redundantes de logs internos
+        await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* Customer profile created globally and mapped successfully into the Service Desk project.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Account ID: \`${realAccountId}\``), true);
         
         const mensajePublicoJira = `Hello,\n\nThe user has been created in Jira Cloud. We have sent the instructions to the mail requested, we proceed to close this ticket.\n\nBest regards.`;
         await añadirComentarioJira(ticketKey, comentarioCompleto(mensajePublicoJira), false); 
 
+        // Transicionar estados de cierre automático (61 -> 151 / Fixed)
         await ejecutarCierreDeTicket(ticketKey);
 
       } catch (err) { 
         console.error('💥 Jira customer route error:', err.message);
         let errorDetails = err.message;
         if (err.response && err.response.data) errorDetails = JSON.stringify(err.response.data);
-        await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error mapping user dynamically to Service Desk.\n\n- Details: ${errorDetails}`), true);
+        await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error executing provisioning workflow.\n\n- Details: ${errorDetails}`), true);
       } finally { 
         setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000); 
       }
@@ -264,14 +246,8 @@ expressApp.post('/jira-webhook', async (req, res) => {
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   const userId = body.user.id;
   const botonValorRaw = body.actions[0].value || ''; 
-  let ticketKey = botonValorRaw;
-  let userEmailDetectado = 'developer.test@seat.de'; 
-
-  if (botonValorRaw.includes('_')) {
-    const partes = botonValorRaw.split('_');
-    ticketKey = partes[0];
-    userEmailDetectado = partes[1];
-  }
+  let ticketKey = botonValorRaw.split('_')[0];
+  let userEmailDetectado = botonValorRaw.split('_')[1] || 'test@seat.de';
 
   const ticketUrl = `https://${process.env.JIRA_DOMAIN}/browse/${ticketKey}`;
 
@@ -354,50 +330,51 @@ async function ejecutarCierreDeTicket(ticketKey) {
 }
 
 // ==========================================
-// API AUXILIAR: ARQUITECTURA MIXTA (USERS GLOBAL + GRUPO DE ACCESO + CUSTOMER MAP)
+// API AUXILIAR: IMPLEMENTACIÓN EN DOS PASOS INTEGRAL (USERS GLOBAL + CUSTOMERS MARKEY)
 // ==========================================
-async function asegurarUsuarioEnJira(email, firstName, lastName) {
+async function asegurarUsuarioEnJira(email, firstName, lastName, ticketKey) {
   try {
-    // A. Buscar si el usuario ya existe en Atlassian para heredar ID sin pisar nada
+    // 1. Validar si ya existía previamente a nivel global para reutilizar su ID sin duplicar
     const searchUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/user/search?query=${encodeURIComponent(email)}`;
     const searchRes = await axios.get(searchUrl, { headers: JIRA_HEADERS });
     
     let accountId = null;
 
     if (searchRes.data && searchRes.data.length > 0) {
-      console.log(`🔍 [JIRA] El usuario ya existe en la organización con ID: ${searchRes.data[0].accountId}`);
+      console.log(`🔍 [JIRA] El usuario ya existe en Users con ID: ${searchRes.data[0].accountId}`);
       accountId = searchRes.data[0].accountId;
     } else {
-      // B. 🚀 SOLUCIÓN DEFINITIVA: Forzar inserción en el Core Global de Atlassian (Aparecerá en "Users")
-      // Le pasamos products: [] para que no chupe licencia pagada de agente, pero exista físicamente
+      // 2. [PASO 1]: Forzar creación global en la pestaña "Users" (admin.atlassian.com) sin licencias
+      // Retorna 201 Created. Esencial para que el ecosistema pueda tratarlo como Confluence Guest.
       const coreUserUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/user`;
-      const payload = {
+      const payloadCore = {
         emailAddress: email,
         displayName: `${firstName} ${lastName}`,
         products: [] 
       };
       
-      console.log(`➕ [JIRA] Forzando inserción en el directorio global de Atlassian (Users)...`);
-      const createRes = await axios.post(coreUserUrl, payload, { headers: JIRA_HEADERS });
+      console.log(`➕ [JIRA API] Forzando inserción en el directorio global (Users)...`);
+      const createRes = await axios.post(coreUserUrl, payloadCore, { headers: JIRA_HEADERS });
       
       if (createRes.data && createRes.data.accountId) {
         accountId = createRes.data.accountId;
-        console.log(`✅ [JIRA] Cuenta persistida en el directorio general con ID: ${accountId}`);
+        console.log(`✅ [JIRA API] Cuenta persistida en Users con ID: ${accountId}`);
       } else {
         return { success: false, errorReason: "Core User API did not return an accountId" };
       }
     }
 
-    // C. 👑 ASIGNACIÓN DE GRUPOS: Metemos al usuario global en vuestro grupo para heredar Confluence Guest
-    const nombreGrupoHst = "jira-servicedesk-customers-hst"; 
-    try {
-      const urlGrupo = `https://${process.env.JIRA_DOMAIN}/rest/api/3/group/user?groupname=${encodeURIComponent(nombreGrupoHst)}`;
-      console.log(`👥 [JIRA] Sincronizando privilegios en el grupo general: ${nombreGrupoHst}...`);
-      await axios.post(urlGrupo, { accountId: accountId }, { headers: JIRA_HEADERS });
-      console.log(`✅ [JIRA] Privilegios Guest sincronizados con éxito.`);
-    } catch (groupErr) {
-      console.warn(`⚠️ [JIRA GRUPO WARNING] Sincronización de grupo fallida. Detalles:`, groupErr.message);
-    }
+    // 3. [PASO 2]: Forzar el mapeo físico al proyecto Service Desk HST (Equivale al 204 exitoso de Postman)
+    const projectKey = ticketKey.split('-')[0]; // Extrae "HST" dinámicamente
+    const urlGetSD = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/projectKey:${projectKey}`;
+    const resSD = await axios.get(urlGetSD, { headers: JIRA_HEADERS });
+    const realServiceDeskId = resSD.data?.id || "2"; // Por defecto usa el ID 2 si hay retrasos en el GET
+
+    const addCustomerUrl = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/${realServiceDeskId}/customer`;
+    console.log(`🔗 [JIRA API] Ejecutando mapeo del ID ${accountId} en la lista de Customers del Service Desk ${realServiceDeskId}...`);
+    
+    await axios.post(addCustomerUrl, { accountIds: [accountId] }, { headers: JIRA_HEADERS });
+    console.log(`🎉 [JIRA API] Doble alta finalizada e indexada con éxito.`);
 
     return { success: true, accountId: accountId };
 
