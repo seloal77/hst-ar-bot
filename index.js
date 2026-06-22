@@ -173,7 +173,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
     }
 
     // ------------------------------------------------
-    // RUTA B: JIRA (HOLA SUPPORT) - ARQUITECTURA DE DOS PASOS (VALIDADO EN POSTMAN)
+    // RUTA B: JIRA (HOLA SUPPORT) - ARQUITECTURA DE DOS PASOS + SLEEP
     // ------------------------------------------------
     else if (esAltaJiraValida) {
       console.log(`📬 [WEBHOOK JIRA] Processing Jira Customer provisioning for ${ticketKey}...`);
@@ -201,7 +201,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
       res.status(200).send('Processing Jira started.');
 
       try {
-        // Ejecuta el motor encadenado (Paso 1: Users global [201] + Paso 2: Customers del proyecto [204])
+        // Ejecuta el motor encadenado con la pausa integrada
         console.log(`👤 [BOT] Triggering sequential dual-step insertion (Global Users + Project Customers Mapping)...`);
         const resultadoUsuario = await asegurarUsuarioEnJira(userEmail, userFirstName, userLastName, ticketKey);
 
@@ -212,11 +212,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
         const realAccountId = resultadoUsuario.accountId;
 
-        // Pausa controlada para permitir indexación física antes de cerrar
-        console.log(`⏳ [BOT] Waiting 5 seconds to consolidate user record into search indexes...`);
-        await new Promise(resolve => setTimeout(resolve, 5000));
-
-        // Comentario limpio sin líneas redundantes de logs internos
+        // Comentario limpio en el ticket
         await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* Customer profile created globally and mapped successfully into the Service Desk project.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Account ID: \`${realAccountId}\``), true);
         
         const mensajePublicoJira = `Hello,\n\nThe user has been created in Jira Cloud. We have sent the instructions to the mail requested, we proceed to close this ticket.\n\nBest regards.`;
@@ -330,7 +326,7 @@ async function ejecutarCierreDeTicket(ticketKey) {
 }
 
 // ==========================================
-// API AUXILIAR: IMPLEMENTACIÓN EN DOS PASOS INTEGRAL (USERS GLOBAL + CUSTOMERS MARKEY)
+// API AUXILIAR: IMPLEMENTACIÓN EN DOS PASOS CON RETRASO DE VINCULACIÓN (SLEEP)
 // ==========================================
 async function asegurarUsuarioEnJira(email, firstName, lastName, ticketKey) {
   try {
@@ -344,8 +340,7 @@ async function asegurarUsuarioEnJira(email, firstName, lastName, ticketKey) {
       console.log(`🔍 [JIRA] El usuario ya existe en Users con ID: ${searchRes.data[0].accountId}`);
       accountId = searchRes.data[0].accountId;
     } else {
-      // 2. [PASO 1]: Forzar creación global en la pestaña "Users" (admin.atlassian.com) sin licencias
-      // Retorna 201 Created. Esencial para que el ecosistema pueda tratarlo como Confluence Guest.
+      // 2. [PASO 1]: Forzar creación global en la pestaña "Users" sin licencias (Retorna 201 Created)
       const coreUserUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/user`;
       const payloadCore = {
         emailAddress: email,
@@ -364,17 +359,21 @@ async function asegurarUsuarioEnJira(email, firstName, lastName, ticketKey) {
       }
     }
 
-    // 3. [PASO 2]: Forzar el mapeo físico al proyecto Service Desk HST (Equivale al 204 exitoso de Postman)
-    const projectKey = ticketKey.split('-')[0]; // Extrae "HST" dinámicamente
+    // ⏳ 👑 PAUSA DE 5 SEGUNDOS: Da margen a Atlassian para asimilar el ID en su base de datos distribuida
+    console.log(`⏳ [JIRA API] Congelando motor 5 segundos para que Jira replique internamente el ID ${accountId}...`);
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // 3. [PASO 2]: Forzar el mapeo físico al proyecto Service Desk HST usando el ID guardado en memoria (204 No Content)
+    const projectKey = ticketKey.split('-')[0]; 
     const urlGetSD = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/projectKey:${projectKey}`;
     const resSD = await axios.get(urlGetSD, { headers: JIRA_HEADERS });
-    const realServiceDeskId = resSD.data?.id || "2"; // Por defecto usa el ID 2 si hay retrasos en el GET
+    const realServiceDeskId = resSD.data?.id || "2"; 
 
     const addCustomerUrl = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/${realServiceDeskId}/customer`;
-    console.log(`🔗 [JIRA API] Ejecutando mapeo del ID ${accountId} en la lista de Customers del Service Desk ${realServiceDeskId}...`);
+    console.log(`🔗 [JIRA API] Enviando ID ${accountId} a la lista de Customers de la mesa de soporte ${realServiceDeskId}...`);
     
     await axios.post(addCustomerUrl, { accountIds: [accountId] }, { headers: JIRA_HEADERS });
-    console.log(`🎉 [JIRA API] Doble alta finalizada e indexada con éxito.`);
+    console.log(`🎉 [JIRA API] Doble alta e indexación asíncrona completadas con éxito.`);
 
     return { success: true, accountId: accountId };
 
