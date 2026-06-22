@@ -176,7 +176,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
     }
 
     // ------------------------------------------------
-    // RUTA B: JIRA (HOLA SUPPORT) - PORTAL / GUEST SIN LICENCIA
+    // RUTA B: JIRA (HOLA SUPPORT) - MIXTO: USERS + CUSTOMERS
     // ------------------------------------------------
     else if (esAltaJiraValida) {
       console.log(`📬 [WEBHOOK JIRA] Processing Jira Customer provisioning for ${ticketKey}...`);
@@ -204,8 +204,8 @@ expressApp.post('/jira-webhook', async (req, res) => {
       res.status(200).send('Processing Jira started.');
 
       try {
-        // 1️⃣ PASO 1: Creación forzada en el limbo de JSM Customer para forzar ID correcto
-        console.log(`👤 [BOT] Provisioning user ${userEmail} via JSM Portal-Only Engine...`);
+        // 1️⃣ PASO 1: Inserción en el directorio híbrido (Asegura Users + Customers + Confluence Guest)
+        console.log(`👤 [BOT] Provisioning user ${userEmail} via Atlassian Hybrid Engine...`);
         const resultadoUsuario = await asegurarUsuarioEnJira(userEmail, userFirstName, userLastName);
 
         if (!resultadoUsuario.success) {
@@ -225,23 +225,22 @@ expressApp.post('/jira-webhook', async (req, res) => {
           throw new Error(`Could not resolve a Service Desk ID for project key: ${projectKey}`);
         }
 
-        // 2️⃣ PASO 2: Forzar mapeo físico en Service Desk (Alineado con el 204 exitoso de Postman)
-        console.log(`🎯 [BOT] Service Desk ID resolved: ${realServiceDeskId}. Linking customer profile via accountIds...`);
+        // 2️⃣ PASO 2: Forzar el mapeo físico al proyecto Service Desk (Para que salga sí o sí en Customers web)
+        console.log(`🎯 [BOT] Service Desk ID resolved: ${realServiceDeskId}. Linking profile via accountIds...`);
         const urlAddSD = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/${realServiceDeskId}/customer`;
         await axios.post(urlAddSD, { accountIds: [realAccountId] }, { headers: JIRA_HEADERS });
         console.log(`🎉 [BOT] User successfully mapped into Service Desk registry.`);
 
-        // 3️⃣ PASO 3: Pausa controlada (Permite asentar los índices de Atlassian para evitar búsquedas vacías)
+        // 3️⃣ PASO 3: Pausa controlada para indexación
         console.log(`⏳ [BOT] Waiting 5 seconds to consolidate user record into search indexes...`);
         await new Promise(resolve => setTimeout(resolve, 5000));
 
-        // 4️⃣ PASO 4: Comentarios limpios (Eliminada la línea redundante del Context) y Cierre
+        // 4️⃣ PASO 4: Comentarios limpios y Cierre automático (61 -> 151 / Fixed)
         await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* Customer created, mapped and group privileges synchronized successfully in Jira Service Desk.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Account ID: \`${realAccountId}\``), true);
         
         const mensajePublicoJira = `Hello,\n\nThe user has been created in Jira Cloud. We have sent the instructions to the mail requested, we proceed to close this ticket.\n\nBest regards.`;
         await añadirComentarioJira(ticketKey, comentarioCompleto(mensajePublicoJira), false); 
 
-        // Transicionar estados (61 -> 151 / Fixed)
         await ejecutarCierreDeTicket(ticketKey);
 
       } catch (err) { 
@@ -355,11 +354,11 @@ async function ejecutarCierreDeTicket(ticketKey) {
 }
 
 // ==========================================
-// API AUXILIAR: IMPLEMENTACIÓN DE MOTOR PORTAL-ONLY + ASIGNACIÓN DE GRUPOS GUEST
+// API AUXILIAR: ARQUITECTURA MIXTA (USERS GLOBAL + GRUPO DE ACCESO + CUSTOMER MAP)
 // ==========================================
 async function asegurarUsuarioEnJira(email, firstName, lastName) {
   try {
-    // A. Buscar si el usuario ya existe globalmente en Atlassian para heredar ID
+    // A. Buscar si el usuario ya existe en Atlassian para heredar ID sin pisar nada
     const searchUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/user/search?query=${encodeURIComponent(email)}`;
     const searchRes = await axios.get(searchUrl, { headers: JIRA_HEADERS });
     
@@ -369,37 +368,33 @@ async function asegurarUsuarioEnJira(email, firstName, lastName) {
       console.log(`🔍 [JIRA] El usuario ya existe en la organización con ID: ${searchRes.data[0].accountId}`);
       accountId = searchRes.data[0].accountId;
     } else {
-      // B. Si no existe, forzamos la llamada de Service Desk que genera cuentas sin licencias
-      const customerUrl = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/customer`;
+      // B. 🚀 SOLUCIÓN DEFINITIVA: Forzar inserción en el Core Global de Atlassian (Aparecerá en "Users")
+      // Le pasamos products: [] para que no chupe licencia pagada de agente, pero exista físicamente
+      const coreUserUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/user`;
       const payload = {
-        email: email,
-        displayName: `${firstName} ${lastName}`
+        emailAddress: email,
+        displayName: `${firstName} ${lastName}`,
+        products: [] 
       };
       
-      console.log(`➕ [JIRA] Generando ID de usuario mediante JSM Customer API...`);
-      const createRes = await axios.post(customerUrl, payload, { headers: JIRA_HEADERS });
+      console.log(`➕ [JIRA] Forzando inserción en el directorio global de Atlassian (Users)...`);
+      const createRes = await axios.post(coreUserUrl, payload, { headers: JIRA_HEADERS });
       
       if (createRes.data && createRes.data.accountId) {
         accountId = createRes.data.accountId;
-        console.log(`✅ [JIRA] Cuenta persistida en portal con ID: ${accountId}`);
+        console.log(`✅ [JIRA] Cuenta persistida en el directorio general con ID: ${accountId}`);
       } else {
-        return { success: false, errorReason: "JSM Customer API did not return an accountId" };
+        return { success: false, errorReason: "Core User API did not return an accountId" };
       }
     }
 
-    // C. 👑 INSERCIÓN EN EL PROYECTO (La clave para vincular el ID y consolidar su rol)
-    const projectKeyOrId = "HST"; 
-    const addCustomerUrl = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/${projectKeyOrId}/customer`;
-    console.log(`🔗 [JIRA] Forzando vinculación al Service Desk: ${projectKeyOrId}...`);
-    await axios.post(addCustomerUrl, { accountIds: [accountId] }, { headers: JIRA_HEADERS });
-
-    // D. 👑 ASIGNACIÓN DE GRUPOS: Aquí inyectamos al usuario al grupo de Confluence Guest
+    // C. 👑 ASIGNACIÓN DE GRUPOS: Metemos al usuario global en vuestro grupo para heredar Confluence Guest
     const nombreGrupoHst = "jira-servicedesk-customers-hst"; 
     try {
       const urlGrupo = `https://${process.env.JIRA_DOMAIN}/rest/api/3/group/user?groupname=${encodeURIComponent(nombreGrupoHst)}`;
-      console.log(`👥 [JIRA] Sincronizando privilegios Guest en el grupo: ${nombreGrupoHst}...`);
+      console.log(`👥 [JIRA] Sincronizando privilegios en el grupo general: ${nombreGrupoHst}...`);
       await axios.post(urlGrupo, { accountId: accountId }, { headers: JIRA_HEADERS });
-      console.log(`✅ [JIRA] Privilegios Guest inyectados con éxito.`);
+      console.log(`✅ [JIRA] Privilegios Guest sincronizados con éxito.`);
     } catch (groupErr) {
       console.warn(`⚠️ [JIRA GRUPO WARNING] Sincronización de grupo fallida. Detalles:`, groupErr.message);
     }
