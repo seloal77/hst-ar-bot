@@ -212,7 +212,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
         const realAccountId = resultadoUsuario.accountId;
 
         // Comentario limpio en el ticket
-        await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* Customer profile created globally.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Account ID: \`${realAccountId}\``), true);
+        await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* User profile created successfully in Jira Cloud.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Account ID: \`${realAccountId}\``), true);
         
         const mensajePublicoJira = `Hello,\n\nThe user has been created in Jira Cloud. We have sent the instructions to the mail requested, we proceed to close this ticket.\n\nBest regards.`;
         await añadirComentarioJira(ticketKey, comentarioCompleto(mensajePublicoJira), false); 
@@ -369,7 +369,7 @@ async function asegurarUsuarioEnJira(email, firstName, lastName, ticketKey) {
 }
 
 // ==========================================
-// API REAL DE ADOBE
+// API REAL DE ADOBE (BLINDADA CONTRA FALSOS POSITIVOS)
 // ==========================================
 async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
   try {
@@ -396,11 +396,25 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
       headers: { 'Authorization': `Bearer ${accessToken}`, 'X-Api-Key': process.env.ADOBE_CLIENT_ID, 'Content-Type': 'application/json' }
     });
 
-    if (apiResponse.data?.completed === 0 && apiResponse.data?.errors?.length > 0) {
+    console.log(`📡 [ADOBE API DEBUG]:`, JSON.stringify(apiResponse.data));
+
+    // 🔍 SI ADOBE CONFIRMA AL MENOS UNA ACCIÓN REALIZADA, SE CONSIDERA ÉXITO ABSOLUTO
+    if (apiResponse.data?.completed > 0) {
+      console.log(`✅ [ADOBE] Operación confirmada como exitosa por el backend.`);
+      return { success: true };
+    }
+
+    if (apiResponse.data?.errors?.length > 0) {
       const errorDetalle = apiResponse.data.errors[0];
-      if (errorDetalle.errorCode === "error.user.already_in_org") return { success: true };
+      
+      // Si el usuario ya estaba en la organización, también cuenta como éxito funcional
+      if (errorDetalle.errorCode === "error.user.already_in_org") {
+        return { success: true };
+      }
+
       return { success: false, errorReason: errorDetalle.message || errorDetalle.errorCode };
     }
+    
     return { success: true };
   } catch (error) {
     let msg = error.message;
