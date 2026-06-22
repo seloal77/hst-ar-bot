@@ -3,6 +3,7 @@ const express = require('express');
 const { App, ExpressReceiver } = require('@slack/bolt');
 const axios = require('axios');
 const nodemailer = require('nodemailer'); 
+const dns = require('dns').promises; // Verificación de dominios reales por registros MX
 
 const PORT = process.env.PORT || 10000;
 const ALLOWED_APPROVERS = (process.env.ALLOWED_APPROVERS || '').split(',').map(id => id.trim());
@@ -84,7 +85,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
   if (currentStatus === 'Request Approved' && idAccion === '14664' && (esAltaAdobeValida || esAltaJiraValida)) {
     
-    const userEmail = fields.customfield_10088;
+    const userEmail = fields.customfield_10088 || '';
     let userFirstName = '';
     let userLastName = '';
 
@@ -179,6 +180,29 @@ expressApp.post('/jira-webhook', async (req, res) => {
     // ------------------------------------------------
     else if (esAltaJiraValida) {
       console.log(`📬 [WEBHOOK JIRA] Processing Jira Customer provisioning for ${ticketKey}...`);
+      
+      const emailDomain = userEmail.split('@')[1];
+
+      // 🔍 VALIDACIÓN DE DOMINIO REAL (Registros MX mediante DNS en caliente)
+      if (emailDomain) {
+        try {
+          console.log(`🔮 [BOT] Verificando si el dominio @${emailDomain} es real y funcional...`);
+          const mxRecords = await dns.resolveMx(emailDomain);
+          
+          if (!mxRecords || mxRecords.length === 0) {
+            throw new Error("No MX records found");
+          }
+        } catch (dnsErr) {
+          console.warn(`🛑 [BOT] El dominio @${emailDomain} es FALSO o no puede recibir correos. Abortando.`);
+          
+          // Nota interna informativa para los agentes deteniendo el flujo
+          await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Proceso interrumpido.\n\nLa dirección de correo electrónico proporcionada (\`${userEmail}\`) pertenece a un dominio inválido o ficticio que no puede recibir mensajes. Por favor, rectifica el campo del correo con una dirección real para volver a procesarlo.`), true);
+          
+          return res.status(200).send('Invalid email domain. Provisioning flow aborted.');
+        }
+      }
+
+      // Si supera con éxito la comprobación del dominio, activamos los bloqueos anti-duplicados y proseguimos
       ticketsProcesadosConExito.add(ticketKey);
       ticketsEnProcesoTemporal.add(ticketKey);
       res.status(200).send('Processing Jira started.');
@@ -207,7 +231,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
           throw new Error(`Could not resolve a Service Desk ID for project key: ${projectKey}`);
         }
 
-        console.log("🎯 [BOT] Service Desk resolved successfully! ID:", realServiceDeskId, ". Mapping user...");
+        console.log(`🎯 [BOT] Service Desk resolved successfully! ID: ${realServiceDeskId}. Mapping user...`);
 
         // Asociamos el usuario al Service Desk correcto usando el ID dinámico obtenido
         const urlAddSD = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/${realServiceDeskId}/customer`;
