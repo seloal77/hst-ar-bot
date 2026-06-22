@@ -193,18 +193,31 @@ expressApp.post('/jira-webhook', async (req, res) => {
         }
 
         const realAccountId = resultadoUsuario.accountId;
-        console.log(`✅ [BOT] Customer profile active with ID: ${realAccountId}. Adding to Service Desk 122...`);
+        console.log(`✅ [BOT] Customer profile active with ID: ${realAccountId}. Resolving Service Desk ID dynamically...`);
 
-        // Mapeo exacto de la lógica de Java: añadir al Service Desk 122 mediante POST
-        const serviceDeskId = "122"; 
-        const urlAddSD = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/${serviceDeskId}/customer`;
+        // Extraemos la Key del proyecto directamente del ticket (ej: de "HST-20938" saca "HST")
+        const projectKey = ticketKey.split('-')[0];
+        
+        // Consultamos a Jira el ID real del Service Desk para esa Key de proyecto de forma dinámica
+        const urlGetSD = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/projectKey:${projectKey}`;
+        const resSD = await axios.get(urlGetSD, { headers: JIRA_HEADERS });
+        const realServiceDeskId = resSD.data?.id;
+
+        if (!realServiceDeskId) {
+          throw new Error(`Could not resolve a Service Desk ID for project key: ${projectKey}`);
+        }
+
+        console.log("🎯 [BOT] Service Desk resolved successfully! ID:", realServiceDeskId, ". Mapping user...");
+
+        // Asociamos el usuario al Service Desk correcto usando el ID dinámico obtenido
+        const urlAddSD = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/${realServiceDeskId}/customer`;
         const payloadSD = { usernames: [userEmail] };
 
         await axios.post(urlAddSD, payloadSD, { headers: JIRA_HEADERS });
-        console.log(`🎉 [BOT] User successfully mapped into Service Desk 122 registry.`);
+        console.log(`🎉 [BOT] User successfully mapped into Service Desk ${realServiceDeskId} registry.`);
 
         // 1. Registro interno en las notas del ticket para los agentes
-        await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* Customer created and mapped successfully in Jira Service Desk.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Service Desk: ${serviceDeskId}\n- Access: Confluence Guest authorized via portal registry.`), true);
+        await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* Customer created and mapped successfully in Jira Service Desk.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Resolved Service Desk ID: ${realServiceDeskId}\n- Access: Confluence Guest authorized via portal registry.`), true);
         
         // 2. Comentario externo público de cierre para el usuario
         const mensajePublicoJira = `Hello,\n\nThe user has been created in Jira Cloud. We have sent the instructions to the mail requested, we proceed to close this ticket.\n\nBest regards.`;
@@ -217,7 +230,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
         console.error('💥 Jira customer route error:', err.message);
         let errorDetails = err.message;
         if (err.response && err.response.data) errorDetails = JSON.stringify(err.response.data);
-        await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error mapping user to Service Desk 122.\n\n- Details: ${errorDetails}`), true);
+        await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error mapping user dynamically to Service Desk.\n\n- Details: ${errorDetails}`), true);
       } finally { 
         setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000); 
       }
