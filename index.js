@@ -178,44 +178,42 @@ expressApp.post('/jira-webhook', async (req, res) => {
     // RUTA B: JIRA (HOLA SUPPORT)
     // ------------------------------------------------
     else if (esAltaJiraValida) {
-      console.log(`📬 [WEBHOOK JIRA] Processing Jira provisioning for ${ticketKey}...`);
+      console.log(`📬 [WEBHOOK JIRA] Processing Jira Customer provisioning for ${ticketKey}...`);
       ticketsProcesadosConExito.add(ticketKey);
       ticketsEnProcesoTemporal.add(ticketKey);
       res.status(200).send('Processing Jira started.');
 
       try {
-        console.log(`👤 [BOT] Provisioning user ${userEmail} (${userFirstName} ${userLastName}) via JSM Customer API...`);
+        console.log(`👤 [BOT] Creating user ${userEmail} (${userFirstName} ${userLastName}) as a Customer...`);
         const resultadoUsuario = await asegurarUsuarioEnJira(userEmail, userFirstName, userLastName);
 
         if (!resultadoUsuario.success) {
-          await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Failed to provision user in Jira directory.\n\n- Reason: ${resultadoUsuario.errorReason}`), true);
+          await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Failed to create customer in Jira.\n\n- Reason: ${resultadoUsuario.errorReason}`), true);
           return;
         }
 
         const realAccountId = resultadoUsuario.accountId;
-        const gruposJira = ['Guest-Confluence_HST', 'Triger_Comment'];
-        let erroresGrupos = [];
+        console.log(`✅ [BOT] Customer profile active with ID: ${realAccountId}. Granting Confluence Guest access...`);
 
-        for (const grupo of gruposJira) {
-          const resGrupo = await añadirUsuarioAGrupoJira(realAccountId, grupo);
-          if (!resGrupo.success) erroresGrupos.push(`${grupo} (${resGrupo.errorReason})`);
-        }
+        // Concedemos el acceso como Guest a Confluence vinculándolo de forma nativa al registro de clientes del portal
+        const urlGuestAccess = `https://${process.env.JIRA_DOMAIN}/rest/servicedeskapi/servicedesk/customers`;
+        await axios.post(urlGuestAccess, { usernames: [userEmail] }, { headers: JIRA_HEADERS });
 
-        if (erroresGrupos.length === 0) {
-          // 1. Registro interno para agentes
-          await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* User licensed and provisioned successfully in Jira Cloud.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Assigned Groups: ${gruposJira.map(g => `\`${g}\``).join(', ')}`), true);
-          
-          // 2. Comentario externo público de cierre para Jira Cloud
-          const mensajePublicoJira = `Hello,\n\nThe user has been created in Jira Cloud. We have sent the instructions to the mail requested, we proceed to close this ticket.\n\nBest regards.`;
-          await añadirComentarioJira(ticketKey, comentarioCompleto(mensajePublicoJira), false); 
+        // 1. Registro interno en las notas del ticket para los agentes
+        await añadirComentarioJira(ticketKey, comentarioCompleto(`🤖 *[HST Access SyncBot]* Customer created successfully in Jira Service Desk.\n\n- User: ${userEmail}\n- Name: ${userFirstName} ${userLastName}\n- Access: Confluence Guest authorized via portal registry.`), true);
+        
+        // 2. Comentario externo público de cierre para el usuario
+        const mensajePublicoJira = `Hello,\n\nThe user has been created in Jira Cloud. We have sent the instructions to the mail requested, we proceed to close this ticket.\n\nBest regards.`;
+        await añadirComentarioJira(ticketKey, comentarioCompleto(mensajePublicoJira), false); 
 
-          // 3. Cierre de ticket encadenado (61 -> 151)
-          await ejecutarCierreDeTicket(ticketKey);
-        } else {
-          await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Provisioning partial failure in Jira Groups.\n\n- Failed Groups: ${erroresGrupos.join(', ')}`), true);
-        }
+        // 3. Cierre automático y encadenado del ticket (61 -> 151)
+        await ejecutarCierreDeTicket(ticketKey);
+
       } catch (err) { 
-        console.error('💥 Jira route error:', err.message); 
+        console.error('💥 Jira customer route error:', err.message);
+        let errorDetails = err.message;
+        if (err.response && err.response.data) errorDetails = JSON.stringify(err.response.data);
+        await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error during Confluence Guest assignment.\n\n- Details: ${errorDetails}`), true);
       } finally { 
         setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000); 
       }
@@ -354,22 +352,6 @@ async function asegurarUsuarioEnJira(email, firstName, lastName) {
   } catch (error) {
     let msg = error.message;
     if (error.response && error.response.data) msg = JSON.stringify(error.response.data);
-    return { success: false, errorReason: msg };
-  }
-}
-
-// ==========================================
-// API AUXILIAR: ALTA EN GRUPOS DE JIRA
-// ==========================================
-async function añadirUsuarioAGrupoJira(accountId, grupoNombre) {
-  try {
-    const url = `https://${process.env.JIRA_DOMAIN}/rest/api/3/group/user?groupname=${encodeURIComponent(grupoNombre)}`;
-    const response = await axios.post(url, { accountId: accountId }, { headers: JIRA_HEADERS });
-    if (response.status === 201 || response.status === 200) return { success: true };
-    return { success: false, errorReason: `Status ${response.status}` };
-  } catch (error) {
-    let msg = error.message;
-    if (error.response && error.response.data) msg = typeof error.response.data === 'object' ? JSON.stringify(error.response.data) : error.response.data;
     return { success: false, errorReason: msg };
   }
 }
