@@ -155,7 +155,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
       } catch (error) {
         console.error('💥 Error Webhook Adobe:', error.message);
-      } finaly {
+      } finally {
         setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000);
       }
     }
