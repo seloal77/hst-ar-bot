@@ -1,27 +1,21 @@
+// index.js
 require('dotenv').config();
 const express = require('express');
 const { App, ExpressReceiver } = require('@slack/bolt');
 const axios = require('axios');
 const nodemailer = require('nodemailer'); 
-const dns = require('dns').promises; // Verificación de dominios reales por registros MX
+const dns = require('dns').promises;
+
+// 📦 IMPORTACIÓN DE NUESTROS SERVICIOS MODULARES
+const { asegurarUsuarioEnJira, JIRA_HEADERS } = require('./jiraService');
+const { crearUsuarioEnAdobe } = require('./aemService');
 
 const PORT = process.env.PORT || 10000;
 const ALLOWED_APPROVERS = (process.env.ALLOWED_APPROVERS || '').split(',').map(id => id.trim());
 
-const JIRA_AUTH = Buffer.from(`${process.env.JIRA_EMAIL || ''}:${process.env.JIRA_API_TOKEN || ''}`).toString('base64');
-
-// 👑 HEADERS CON PASE EXPERIMENTAL INTEGRADO
-const JIRA_HEADERS = {
-  'Authorization': `Basic ${JIRA_AUTH}`,
-  'Content-Type': 'application/json',
-  'Accept': 'application/json',
-  'X-ExperimentalApi': 'opt-in'
-};
-
 const ticketsProcesadosConExito = new Set();
 const ticketsEnProcesoTemporal = new Set();
 
-// Configuración del servicio de correo electrónico
 const mailTransporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com', 
   port: process.env.SMTP_PORT || 587,
@@ -104,7 +98,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
     userLastName = userLastName.trim();
 
     // ------------------------------------------------
-    // RUTA A: ADOBE (CMS)
+    // RUTA A: ADOBE (CMS) -> LLAMADA AL MÓDULO EXTERNO
     // ------------------------------------------------
     if (esAltaAdobeValida) {
       ticketsProcesadosConExito.add(ticketKey);
@@ -132,6 +126,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
         const gruposAdobeFinales = marcasAAgregar.map(brand => `SEAT_CUPRA_${paisNombre}_${brand}_Website_${permisoTexto}_IMS`);
 
+        // Ejecución modular desde aemService
         const resultadoAdobe = await crearUsuarioEnAdobe(userEmail, userFirstName, userLastName, gruposAdobeFinales);
 
         if (resultadoAdobe.success) {
@@ -160,13 +155,13 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
       } catch (error) {
         console.error('💥 Error Webhook Adobe:', error.message);
-      } finally {
+      } finaly {
         setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000);
       }
     }
 
     // ------------------------------------------------
-    // RUTA B: JIRA (HOLA SUPPORT)
+    // RUTA B: JIRA (HOLA SUPPORT) -> LLAMADA AL MÓDULO EXTERNO
     // ------------------------------------------------
     else if (esAltaJiraValida) {
       const emailDomain = userEmail.split('@')[1];
@@ -186,7 +181,8 @@ expressApp.post('/jira-webhook', async (req, res) => {
       res.status(200).send('Processing Jira started.');
 
       try {
-        const resultadoUsuario = await asegurarUsuarioEnJira(userEmail, userFirstName, userLastName, ticketKey);
+        // Ejecución modular desde jiraService
+        const resultadoUsuario = await asegurarUsuarioEnJira(userEmail, userFirstName, userLastName);
 
         if (!resultadoUsuario.success) {
           await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Failed to complete provisioning.\n\n- Reason: ${resultadoUsuario.errorReason}`), true);
@@ -202,7 +198,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
       } catch (err) { 
         await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error executing workflow.\n\n- Details: ${err.message}`), true);
-      } finally { 
+      } finaly { 
         setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000); 
       }
     }
@@ -213,7 +209,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 });
 
 // ==========================================
-// 2. INTERACTIVIDAD SLACK
+// 2. INTERACTIVIDAD SLACK (BOLT ACTIONS)
 // ==========================================
 slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   const userId = body.user.id;
@@ -221,7 +217,7 @@ slackApp.action('approve_user_adobe', async ({ ack, body, respond }) => {
   let ticketKey = botonValorRaw.split('_')[0];
   let userEmailDetectado = botonValorRaw.split('_')[1] || 'test@seat.de';
 
-  const ticketUrl = `https://${process.env.JIRA_DOMAIN}/browse/${ticketKey}`;
+  const ticketUrl = `https://` + process.env.JIRA_DOMAIN + `/browse/${ticketKey}`;
 
   if (ALLOWED_APPROVERS.length > 0 && !ALLOWED_APPROVERS.includes(userId)) {
     await ack(); 
@@ -285,97 +281,6 @@ async function ejecutarCierreDeTicket(ticketKey) {
     await axios.post(urlTransiciones, { transition: { id: "151" } }, { headers: JIRA_HEADERS });
   } catch (err) {
     console.error(`💥 Error cerrando ticket:`, err.message);
-  }
-}
-
-async function asegurarUsuarioEnJira(email, firstName, lastName, ticketKey) {
-  try {
-    const searchUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/user/search?query=${encodeURIComponent(email)}`;
-    const searchRes = await axios.get(searchUrl, { headers: JIRA_HEADERS });
-    
-    let accountId = null;
-
-    if (searchRes.data && searchRes.data.length > 0) {
-      accountId = searchRes.data[0].accountId;
-    } else {
-      const coreUserUrl = `https://${process.env.JIRA_DOMAIN}/rest/api/3/user`;
-      const payloadCore = { emailAddress: email, displayName: `${firstName} ${lastName}`, products: [] };
-      const createRes = await axios.post(coreUserUrl, payloadCore, { headers: JIRA_HEADERS });
-      
-      if (createRes.data && createRes.data.accountId) {
-        accountId = createRes.data.accountId;
-      } else {
-        return { success: false, errorReason: "Core User API did not return an accountId" };
-      }
-    }
-    return { success: true, accountId: accountId };
-  } catch (error) {
-    return { success: false, errorReason: error.message };
-  }
-}
-
-// ==========================================
-// API REAL DE ADOBE (RESTAURADA CON TRADUCCIÓN AMIGABLE)
-// ==========================================
-async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
-  try {
-    const tokenUrl = 'https://ims-na1.adobelogin.com/ims/token/v3';
-    const params = new URLSearchParams();
-    params.append('grant_type', 'client_credentials');
-    params.append('client_id', process.env.ADOBE_CLIENT_ID);
-    params.append('client_secret', process.env.ADOBE_CLIENT_SECRET);
-    params.append('scope', 'openid,AdobeID,user_management_sdk');
-
-    const tokenResponse = await axios.post(tokenUrl, params, { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-    const accessToken = tokenResponse.data.access_token;
-
-    const adobeEndpoint = `https://usermanagement.adobe.io/v2/usermanagement/action/${process.env.ADOBE_ORG_ID}`;
-    const adobePayload = [{
-      "user": email,
-      "do": [
-        { "createFederatedID": { "email": email, "country": "ES", "firstname": firstName, "lastname": lastName } },
-        { "add": { "group": grupos } }
-      ]
-    }];
-
-    const apiResponse = await axios.post(adobeEndpoint, adobePayload, {
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'X-Api-Key': process.env.ADOBE_CLIENT_ID, 'Content-Type': 'application/json' }
-    });
-
-    console.log(`📡 [ADOBE API DEBUG]:`, JSON.stringify(apiResponse.data));
-
-    // 🔍 ANALIZADOR GLOBAL DE ERRORES Y ADAPTADOR DE MENSAJES AMIGABLES
-    if (apiResponse.data?.errors?.length > 0) {
-      const errorDetalle = apiResponse.data.errors[0];
-      const errorCode = errorDetalle.errorCode || "";
-      const errorMsg = errorDetalle.message || "";
-      
-      // Caso 1: El usuario ya existía en la consola (Éxito operacional)
-      if (errorCode === "error.user.already_in_org") {
-        return { success: true };
-      }
-
-      // Caso 2: 👑 TRADUCCIÓN AMIGABLE ORIGINAL RESTAURADA (Dominio / Identidad no delegada)
-      if (errorCode.includes("domain") || errorMsg.includes("directory") || errorCode === "country_not_accepted") {
-        return { 
-          success: false, 
-          errorReason: `Identity policy restriction. Please go to Adobe Admin Console -> Settings -> Identity, select the corporate Directory and ensure the user's email domain and country are verified and mapped correctly.` 
-        };
-      }
-
-      // Caso 3: Falso positivo (Si dio error secundario pero completó la acción principal)
-      if (apiResponse.data?.completed > 0) {
-        return { success: true };
-      }
-
-      return { success: false, errorReason: errorMsg || errorCode };
-    }
-
-    return { success: true };
-  } catch (error) {
-    let msg = error.message;
-    if (error.response && error.response.data) msg = JSON.stringify(error.response.data);
-    return { success: false, errorReason: msg };
   }
 }
 
