@@ -198,7 +198,7 @@ expressApp.post('/jira-webhook', async (req, res) => {
 
       } catch (err) { 
         await añadirComentarioJira(ticketKey, comentarioCompleto(`⚠️ *[HST Access SyncBot]* Error executing workflow.\n\n- Details: ${err.message}`), true);
-      } finaly { 
+      } finally { 
         setTimeout(() => ticketsEnProcesoTemporal.delete(ticketKey), 10000); 
       }
     }
