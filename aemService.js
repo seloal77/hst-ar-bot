@@ -41,10 +41,20 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
       const errorCode = errorDetalle.errorCode || "";
       const errorMsg = errorDetalle.message || "";
       
+      // Caso 1: El usuario ya existía en la consola (Éxito operacional)
       if (errorCode === "error.user.already_in_org") {
         return { success: true };
       }
 
+      // Caso 2: 🚨 TRADUCTOR PARA EL ERROR DE FEDERATED ID (Causa: Sync desactivado)
+      if (errorMsg.includes("createFederatedID") || errorCode.includes("createFederatedID")) {
+        return {
+          success: false,
+          errorReason: `Federated ID generation blocked. Please go to Adobe Admin Console -> Settings -> Identity, select your corporate Directory, and ensure that 'Enable Sync' (or identity directory sync) is manually turned ON for this domain.`
+        };
+      }
+
+      // Caso 3: Restricción de dominio / identidad no delegada general
       if (errorCode.includes("domain") || errorMsg.includes("directory") || errorCode === "country_not_accepted") {
         return { 
           success: false, 
@@ -52,6 +62,7 @@ async function crearUsuarioEnAdobe(email, firstName, lastName, grupos) {
         };
       }
 
+      // Caso 4: Falso positivo (Si dio error secundario pero completó la acción principal)
       if (apiResponse.data?.completed > 0) {
         return { success: true };
       }
